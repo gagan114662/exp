@@ -31,6 +31,7 @@ pub mod media_understanding;
 pub mod model_catalog;
 pub mod model_orchestrator;
 pub mod process_manager;
+pub mod video_renderer;
 pub mod prompt_builder;
 pub mod provider_health;
 pub mod python_runtime;
