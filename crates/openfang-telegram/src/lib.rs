@@ -68,6 +68,7 @@ impl TelegramCommand {
 }
 
 /// Telegram bot for bidirectional communication.
+#[derive(Clone)]
 pub struct TelegramBot {
     bot: Bot,
     config: TelegramConfig,

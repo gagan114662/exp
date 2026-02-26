@@ -123,8 +123,10 @@ pub struct OpenFangKernel {
     pub orchestrator: Arc<openfang_runtime::model_orchestrator::ModelOrchestrator>,
     /// Video summary renderer.
     pub video_renderer: Arc<openfang_runtime::video_renderer::VideoRenderer>,
-    /// Telegram channel for bidirectional communication.
-    pub telegram_channel: Option<Arc<openfang_telegram::TelegramChannel>>,
+    /// Telegram bot for bidirectional communication.
+    pub telegram_bot: Option<Arc<openfang_telegram::TelegramBot>>,
+    /// Telegram command sender (for bot to forward commands).
+    telegram_command_tx: Option<tokio::sync::mpsc::Sender<(String, openfang_telegram::TelegramCommand)>>,
     /// Telegram command receiver.
     pub telegram_commands: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(String, openfang_telegram::TelegramCommand)>>>,
     /// OFP peer registry — tracks connected peers.
@@ -849,9 +851,8 @@ impl OpenFangKernel {
             info!("Video summary generation enabled");
         }
 
-        // Initialize Telegram channel
-        let telegram_channel = if let Some(ref telegram_cfg) = config.channels.telegram {
-            // Get bot token from environment variable
+        // Initialize Telegram bot
+        let telegram_bot = if let Some(ref telegram_cfg) = config.channels.telegram {
             let bot_token = std::env::var(&telegram_cfg.bot_token_env).ok();
 
             if bot_token.is_some() {
@@ -859,13 +860,19 @@ impl OpenFangKernel {
                     enabled: true,
                     bot_token,
                     allowed_users: telegram_cfg.allowed_users.iter().map(|id| id.to_string()).collect(),
-                    rate_limit_per_minute: 10, // Default rate limit
+                    rate_limit_per_minute: 10,
                 };
 
-                let (channel, command_rx) = openfang_telegram::TelegramChannel::new(telegram_config);
-
-                info!("Telegram integration enabled");
-                Some((Arc::new(channel), command_rx))
+                match openfang_telegram::TelegramBot::new(telegram_config) {
+                    Ok(bot) => {
+                        info!("Telegram bot initialized");
+                        Some(Arc::new(bot))
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize Telegram bot: {}", e);
+                        None
+                    }
+                }
             } else {
                 warn!("Telegram configured but {} not set", telegram_cfg.bot_token_env);
                 None
@@ -874,10 +881,13 @@ impl OpenFangKernel {
             None
         };
 
-        let (telegram_channel, telegram_commands) = match telegram_channel {
-            Some((ch, rx)) => (Some(ch), tokio::sync::Mutex::new(Some(rx))),
-            None => (None, tokio::sync::Mutex::new(None)),
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(100);
+        let telegram_command_tx = if telegram_bot.is_some() {
+            Some(command_tx)
+        } else {
+            None
         };
+        let telegram_commands = tokio::sync::Mutex::new(Some(command_rx));
 
         let kernel = Self {
             config,
@@ -922,7 +932,8 @@ impl OpenFangKernel {
             process_manager: Arc::new(openfang_runtime::process_manager::ProcessManager::new(5)),
             orchestrator,
             video_renderer,
-            telegram_channel,
+            telegram_bot,
+            telegram_command_tx,
             telegram_commands,
             peer_registry: None,
             peer_node: None,
@@ -2983,6 +2994,20 @@ impl OpenFangKernel {
 
         // Start heartbeat monitor for agent health checking
         self.start_heartbeat_monitor();
+
+        // Start Telegram bot polling in background
+        if let Some(ref bot) = self.telegram_bot {
+            if let Some(ref tx) = self.telegram_command_tx {
+                let bot_clone = (**bot).clone();
+                let tx_clone = tx.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = bot_clone.start_polling(tx_clone).await {
+                        tracing::error!("Telegram bot polling failed: {}", e);
+                    }
+                });
+            }
+        }
 
         // Start OFP peer node if network is enabled
         if self.config.network_enabled && !self.config.network.shared_secret.is_empty() {
