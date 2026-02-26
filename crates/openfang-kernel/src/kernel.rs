@@ -129,6 +129,8 @@ pub struct OpenFangKernel {
     telegram_command_tx: Option<tokio::sync::mpsc::Sender<(String, openfang_telegram::TelegramCommand)>>,
     /// Telegram command receiver.
     pub telegram_commands: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(String, openfang_telegram::TelegramCommand)>>>,
+    /// Raindrop incident subscriber.
+    pub raindrop_subscriber: Option<Arc<crate::raindrop_subscriber::RaindropSubscriber>>,
     /// OFP peer registry — tracks connected peers.
     pub peer_registry: Option<openfang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node.
@@ -967,6 +969,23 @@ impl OpenFangKernel {
         };
         let telegram_commands = tokio::sync::Mutex::new(Some(command_rx));
 
+        // Initialize Raindrop subscriber
+        let raindrop_subscriber = if config.raindrop.enabled && telegram_bot.is_some() {
+            let subscriber = Arc::new(crate::raindrop_subscriber::RaindropSubscriber::new(
+                config.raindrop.clone(),
+                telegram_bot.clone().unwrap(),
+            ));
+
+            info!(
+                api_url = %config.raindrop.api_url,
+                "Raindrop incident subscriber enabled"
+            );
+
+            Some(subscriber)
+        } else {
+            None
+        };
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1013,6 +1032,7 @@ impl OpenFangKernel {
             telegram_bot,
             telegram_command_tx,
             telegram_commands,
+            raindrop_subscriber,
             peer_registry: None,
             peer_node: None,
             booted_at: std::time::Instant::now(),
@@ -3108,6 +3128,17 @@ impl OpenFangKernel {
                             }
                         }
                     }
+                }
+            });
+        }
+
+        // Start Raindrop incident subscriber
+        if let Some(ref subscriber) = self.raindrop_subscriber {
+            let subscriber_clone = subscriber.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = subscriber_clone.subscribe_and_forward().await {
+                    tracing::error!("Raindrop subscriber failed: {}", e);
                 }
             });
         }
