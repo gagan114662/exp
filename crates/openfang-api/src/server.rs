@@ -196,6 +196,10 @@ pub async fn build_router(
             axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
         )
         .route(
+            "/api/agents/{agent_id}/recordings/{task_id}",
+            axum::routing::get(routes::get_video_recording),
+        )
+        .route(
             "/api/agents/{id}/deliveries",
             axum::routing::get(routes::get_agent_deliveries),
         )

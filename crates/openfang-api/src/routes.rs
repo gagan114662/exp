@@ -7174,6 +7174,51 @@ pub async fn get_agent_file(
     )
 }
 
+/// Get a video recording for an agent task.
+pub async fn get_video_recording(
+    State(state): State<Arc<AppState>>,
+    Path((agent_id, task_id)): Path<(String, String)>,
+) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 1], Vec<u8>), (StatusCode, Json<serde_json::Value>)> {
+    if !state.kernel.video_renderer.is_enabled() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Video rendering disabled"})),
+        ));
+    }
+
+    // Construct expected path
+    let recordings_dir = state.kernel.config.data_dir.join("recordings");
+    let video_path = recordings_dir
+        .join(&agent_id)
+        .join(format!("{}.mp4", task_id));
+
+    if !video_path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Recording not found"})),
+        ));
+    }
+
+    // Read file
+    let content = match tokio::fs::read(&video_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read file: {}", e)
+                })),
+            ));
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "video/mp4")],
+        content,
+    ))
+}
+
 /// Request body for writing a workspace identity file.
 #[derive(serde::Deserialize)]
 pub struct SetAgentFileRequest {
