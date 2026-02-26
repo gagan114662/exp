@@ -535,9 +535,18 @@ async fn handle_telegram_command(
             let entry = kernel.registry.get(parsed_id)
                 .ok_or_else(|| format!("Agent {} not found", agent_id))?;
 
+            // Format state in a user-friendly way
+            let state_display = match entry.state {
+                AgentState::Created => "Created (not started)",
+                AgentState::Running => "Running",
+                AgentState::Suspended => "Suspended (paused)",
+                AgentState::Terminated => "Terminated",
+                AgentState::Crashed => "Crashed (awaiting recovery)",
+            };
+
             let response = format!(
-                "Agent: {}\nID: {}\nState: {:?}\nModel: {}",
-                entry.name, entry.id, entry.state, entry.manifest.model.model
+                "Agent: {}\nID: {}\nState: {}\nModel: {}",
+                entry.name, entry.id, state_display, entry.manifest.model.model
             );
 
             bot.send_message(&chat_id, &response).await?;
@@ -3089,7 +3098,14 @@ impl OpenFangKernel {
 
                     while let Some((chat_id, command)) = rx.recv().await {
                         if let Some(k) = kernel_weak.upgrade() {
-                            let _ = handle_telegram_command(k, chat_id, command).await;
+                            if let Err(e) = handle_telegram_command(k, chat_id.clone(), command.clone()).await {
+                                tracing::error!(
+                                    chat_id = %chat_id,
+                                    command = ?command,
+                                    error = %e,
+                                    "Failed to handle Telegram command"
+                                );
+                            }
                         }
                     }
                 }
