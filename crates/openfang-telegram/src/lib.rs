@@ -113,11 +113,11 @@ impl TelegramBot {
 
         info!("Starting Telegram bot polling");
 
-        let config = self.config.clone();
+        let allowed_users = self.config.allowed_users.clone();
 
         teloxide::repl(self.bot.clone(), move |bot: Bot, msg: Message| {
             let tx = command_tx.clone();
-            let allowed = config.allowed_users.clone();
+            let allowed = allowed_users.clone();
 
             async move {
                 let chat_id = msg.chat.id.0.to_string();
