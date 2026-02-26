@@ -1,9 +1,8 @@
 //! Telegram channel integration for OpenFang.
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 /// Telegram channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +35,7 @@ pub enum TelegramCommand {
 /// Telegram channel for bidirectional communication.
 pub struct TelegramChannel {
     config: TelegramConfig,
+    #[allow(dead_code)]
     command_tx: mpsc::Sender<(String, TelegramCommand)>, // (chat_id, command)
 }
 
@@ -63,8 +63,8 @@ impl TelegramChannel {
     pub fn parse_command(text: &str) -> TelegramCommand {
         let text = text.trim();
 
-        if text.starts_with("/run ") {
-            let parts: Vec<&str> = text[5..].splitn(2, ' ').collect();
+        if let Some(args) = text.strip_prefix("/run ") {
+            let parts: Vec<&str> = args.splitn(2, ' ').collect();
             if parts.len() == 2 {
                 return TelegramCommand::Run {
                     agent: parts[0].to_string(),
@@ -77,9 +77,9 @@ impl TelegramChannel {
             return TelegramCommand::ListAgents;
         }
 
-        if text.starts_with("/status ") {
+        if let Some(agent_id) = text.strip_prefix("/status ") {
             return TelegramCommand::Status {
-                agent_id: text[8..].to_string(),
+                agent_id: agent_id.to_string(),
             };
         }
 

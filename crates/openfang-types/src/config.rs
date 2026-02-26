@@ -924,23 +924,16 @@ impl Default for ThinkingConfig {
 // ---------------------------------------------------------------------------
 
 /// Model orchestration configuration for routing tasks to specialized models.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct OrchestratorConfig {
     /// Whether orchestration is enabled.
+    #[serde(default)]
     pub enabled: bool,
 
     /// Task-to-model routing configuration.
+    #[serde(default)]
     pub routing: OrchestratorRouting,
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            routing: OrchestratorRouting::default(),
-        }
-    }
 }
 
 /// Task routing rules for model orchestration.

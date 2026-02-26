@@ -102,10 +102,10 @@ impl VideoRenderer {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
-                            if elapsed > max_age {
-                                if std::fs::remove_file(entry.path()).is_ok() {
-                                    deleted += 1;
-                                }
+                            if elapsed > max_age
+                                && std::fs::remove_file(entry.path()).is_ok()
+                            {
+                                deleted += 1;
                             }
                         }
                     }
