@@ -119,6 +119,14 @@ pub struct OpenFangKernel {
     pub hooks: openfang_runtime::hooks::HookRegistry,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub process_manager: Arc<openfang_runtime::process_manager::ProcessManager>,
+    /// Model orchestrator for multi-model task routing.
+    pub orchestrator: Arc<openfang_runtime::model_orchestrator::ModelOrchestrator>,
+    /// Video summary renderer.
+    pub video_renderer: Arc<openfang_runtime::video_renderer::VideoRenderer>,
+    /// Telegram channel for bidirectional communication.
+    pub telegram_channel: Option<Arc<openfang_telegram::TelegramChannel>>,
+    /// Telegram command receiver.
+    pub telegram_commands: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(String, openfang_telegram::TelegramCommand)>>>,
     /// OFP peer registry — tracks connected peers.
     pub peer_registry: Option<openfang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node.
@@ -822,6 +830,55 @@ impl OpenFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Initialize model orchestrator
+        let orchestrator = Arc::new(openfang_runtime::model_orchestrator::ModelOrchestrator::new(
+            config.orchestrator.clone(),
+        ));
+
+        if config.orchestrator.enabled {
+            info!("Model orchestrator enabled");
+        }
+
+        // Initialize video renderer
+        let video_renderer = Arc::new(openfang_runtime::video_renderer::VideoRenderer::new(
+            config.video.clone(),
+            &config.data_dir,
+        ));
+
+        if config.video.enabled {
+            info!("Video summary generation enabled");
+        }
+
+        // Initialize Telegram channel
+        let telegram_channel = if let Some(ref telegram_cfg) = config.channels.telegram {
+            // Get bot token from environment variable
+            let bot_token = std::env::var(&telegram_cfg.bot_token_env).ok();
+
+            if bot_token.is_some() {
+                let telegram_config = openfang_telegram::TelegramConfig {
+                    enabled: true,
+                    bot_token,
+                    allowed_users: telegram_cfg.allowed_users.iter().map(|id| id.to_string()).collect(),
+                    rate_limit_per_minute: 10, // Default rate limit
+                };
+
+                let (channel, command_rx) = openfang_telegram::TelegramChannel::new(telegram_config);
+
+                info!("Telegram integration enabled");
+                Some((Arc::new(channel), command_rx))
+            } else {
+                warn!("Telegram configured but {} not set", telegram_cfg.bot_token_env);
+                None
+            }
+        } else {
+            None
+        };
+
+        let (telegram_channel, telegram_commands) = match telegram_channel {
+            Some((ch, rx)) => (Some(ch), tokio::sync::Mutex::new(Some(rx))),
+            None => (None, tokio::sync::Mutex::new(None)),
+        };
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -863,6 +920,10 @@ impl OpenFangKernel {
             auto_reply_engine,
             hooks: openfang_runtime::hooks::HookRegistry::new(),
             process_manager: Arc::new(openfang_runtime::process_manager::ProcessManager::new(5)),
+            orchestrator,
+            video_renderer,
+            telegram_channel,
+            telegram_commands,
             peer_registry: None,
             peer_node: None,
             booted_at: std::time::Instant::now(),

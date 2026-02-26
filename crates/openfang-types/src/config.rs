@@ -919,6 +919,93 @@ impl Default for ThinkingConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gap 8: Model Orchestration
+// ---------------------------------------------------------------------------
+
+/// Model orchestration configuration for routing tasks to specialized models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrchestratorConfig {
+    /// Whether orchestration is enabled.
+    pub enabled: bool,
+
+    /// Task-to-model routing configuration.
+    pub routing: OrchestratorRouting,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            routing: OrchestratorRouting::default(),
+        }
+    }
+}
+
+/// Task routing rules for model orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OrchestratorRouting {
+    /// Model spec for research tasks.
+    pub research: Option<ModelSpec>,
+    /// Model spec for coding tasks.
+    pub coding: Option<ModelSpec>,
+    /// Model spec for quick Q&A tasks.
+    pub quick: Option<ModelSpec>,
+    /// Model spec for image generation tasks.
+    pub image: Option<ModelSpec>,
+}
+
+/// Model specification for orchestration routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSpec {
+    /// Provider name (e.g., "anthropic", "gemini", "groq").
+    pub provider: String,
+    /// Model identifier (e.g., "claude-opus-4-6").
+    pub model: String,
+}
+
+// ---------------------------------------------------------------------------
+// Gap 9: Video Summary Generation
+// ---------------------------------------------------------------------------
+
+/// Default retention period for video recordings (30 days).
+fn default_retention_days() -> u32 {
+    30
+}
+
+/// Default maximum storage for video recordings (5000 MB = 5 GB).
+fn default_max_storage_mb() -> u64 {
+    5000
+}
+
+/// Video summary generation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoConfig {
+    /// Whether video summary generation is enabled.
+    pub enabled: bool,
+
+    /// Retention period in days for old recordings.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+
+    /// Maximum total storage in megabytes for recordings.
+    #[serde(default = "default_max_storage_mb")]
+    pub max_storage_mb: u64,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_days: 30,
+            max_storage_mb: 5000,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1039,6 +1126,12 @@ pub struct KernelConfig {
     /// Global spending budget configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Model orchestration configuration.
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
+    /// Video summary generation configuration.
+    #[serde(default)]
+    pub video: VideoConfig,
 }
 
 /// Global spending budget configuration.
@@ -1183,6 +1276,8 @@ impl Default for KernelConfig {
             auth_profiles: HashMap::new(),
             thinking: None,
             budget: BudgetConfig::default(),
+            orchestrator: OrchestratorConfig::default(),
+            video: VideoConfig::default(),
         }
     }
 }
