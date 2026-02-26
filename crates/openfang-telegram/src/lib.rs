@@ -1,7 +1,7 @@
 //! Telegram channel integration for OpenFang.
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use teloxide::prelude::*;
 use tracing::info;
 
 /// Telegram channel configuration.
@@ -32,35 +32,9 @@ pub enum TelegramCommand {
     Unknown { text: String },
 }
 
-/// Telegram channel for bidirectional communication.
-pub struct TelegramChannel {
-    config: TelegramConfig,
-    #[allow(dead_code)]
-    command_tx: mpsc::Sender<(String, TelegramCommand)>, // (chat_id, command)
-}
-
-impl TelegramChannel {
-    /// Create a new Telegram channel.
-    pub fn new(
-        config: TelegramConfig,
-    ) -> (Self, mpsc::Receiver<(String, TelegramCommand)>) {
-        let (command_tx, command_rx) = mpsc::channel(100);
-
-        let channel = Self {
-            config,
-            command_tx,
-        };
-
-        (channel, command_rx)
-    }
-
-    /// Check if Telegram is enabled and configured.
-    pub fn is_enabled(&self) -> bool {
-        self.config.enabled && self.config.bot_token.is_some()
-    }
-
-    /// Parse a text message into a Telegram command.
-    pub fn parse_command(text: &str) -> TelegramCommand {
+impl TelegramCommand {
+    /// Parse a text message into a command.
+    pub fn parse_command(text: &str) -> Self {
         let text = text.trim();
 
         if let Some(args) = text.strip_prefix("/run ") {
@@ -91,17 +65,108 @@ impl TelegramChannel {
             text: text.to_string(),
         }
     }
+}
 
-    /// Start polling for messages (stub implementation).
-    pub async fn start_polling(&self) -> Result<(), String> {
+/// Telegram bot for bidirectional communication.
+pub struct TelegramBot {
+    bot: Bot,
+    config: TelegramConfig,
+}
+
+impl TelegramBot {
+    /// Create a new Telegram bot.
+    pub fn new(config: TelegramConfig) -> Result<Self, String> {
+        let bot_token = config.bot_token.as_ref()
+            .ok_or_else(|| "Bot token not configured".to_string())?;
+
+        let bot = Bot::new(bot_token);
+
+        Ok(Self { bot, config })
+    }
+
+    /// Check if bot is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled && self.config.bot_token.is_some()
+    }
+
+    /// Send a text message to a chat.
+    pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<(), String> {
+        let chat_id_i64: i64 = chat_id.parse()
+            .map_err(|_| format!("Invalid chat_id: {}", chat_id))?;
+
+        self.bot
+            .send_message(ChatId(chat_id_i64), text)
+            .await
+            .map_err(|e| format!("Failed to send message: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Start polling for messages and forward commands.
+    pub async fn start_polling(
+        self,
+        command_tx: tokio::sync::mpsc::Sender<(String, TelegramCommand)>,
+    ) -> Result<(), String> {
         if !self.is_enabled() {
-            return Err("Telegram not enabled or bot token missing".to_string());
+            return Err("Bot not enabled or token missing".to_string());
         }
 
-        info!("Starting Telegram polling (stub - full implementation next)");
+        info!("Starting Telegram bot polling");
 
-        // TODO: Implement actual teloxide polling in next task
-        // For now, just verify config is valid
+        let config = self.config.clone();
+
+        teloxide::repl(self.bot.clone(), move |bot: Bot, msg: Message| {
+            let tx = command_tx.clone();
+            let allowed = config.allowed_users.clone();
+
+            async move {
+                let chat_id = msg.chat.id.0.to_string();
+                let user_id = msg.from().map(|u| u.id.0.to_string());
+
+                // Authorization check
+                if !allowed.is_empty() {
+                    if let Some(uid) = &user_id {
+                        if !allowed.contains(uid) {
+                            // Silent ignore for unauthorized users
+                            return Ok(());
+                        }
+                    } else {
+                        return Ok(());
+                    }
+                }
+
+                if let Some(text) = msg.text() {
+                    let command = TelegramCommand::parse_command(text);
+
+                    // Send command to kernel
+                    let _ = tx.send((chat_id.clone(), command.clone())).await;
+
+                    // Send acknowledgment for known commands
+                    match command {
+                        TelegramCommand::Help => {
+                            bot.send_message(
+                                msg.chat.id,
+                                "Available commands:\n\
+                                /run <agent> <task> - Run a task on an agent\n\
+                                /agents - List all agents\n\
+                                /status <agent_id> - Get agent status\n\
+                                /help - Show this help"
+                            ).await?;
+                        }
+                        TelegramCommand::Unknown { .. } => {
+                            // Don't respond to unknown commands
+                        }
+                        _ => {
+                            // Commands like /run, /agents, /status will be handled by kernel
+                            bot.send_message(msg.chat.id, "Processing...").await?;
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+        })
+        .await;
 
         Ok(())
     }
@@ -122,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_parse_run_command() {
-        let cmd = TelegramChannel::parse_command("/run researcher analyze Bitcoin");
+        let cmd = TelegramCommand::parse_command("/run researcher analyze Bitcoin");
 
         match cmd {
             TelegramCommand::Run { agent, task } => {
@@ -135,19 +200,19 @@ mod tests {
 
     #[test]
     fn test_parse_list_agents() {
-        let cmd = TelegramChannel::parse_command("/agents");
+        let cmd = TelegramCommand::parse_command("/agents");
         assert!(matches!(cmd, TelegramCommand::ListAgents));
     }
 
     #[test]
     fn test_parse_help() {
-        let cmd = TelegramChannel::parse_command("/help");
+        let cmd = TelegramCommand::parse_command("/help");
         assert!(matches!(cmd, TelegramCommand::Help));
     }
 
     #[test]
     fn test_parse_unknown() {
-        let cmd = TelegramChannel::parse_command("Hello bot");
+        let cmd = TelegramCommand::parse_command("Hello bot");
 
         match cmd {
             TelegramCommand::Unknown { text } => {
@@ -166,10 +231,10 @@ mod tests {
             rate_limit_per_minute: 10,
         };
 
-        let (channel, _) = TelegramChannel::new(config);
+        let bot = TelegramBot::new(config).expect("Failed to create bot");
 
-        assert!(channel.is_user_allowed("12345"));
-        assert!(!channel.is_user_allowed("99999"));
+        assert!(bot.is_user_allowed("12345"));
+        assert!(!bot.is_user_allowed("99999"));
     }
 
     #[test]
@@ -181,8 +246,8 @@ mod tests {
             rate_limit_per_minute: 10,
         };
 
-        let (channel, _) = TelegramChannel::new(config);
+        let bot = TelegramBot::new(config).expect("Failed to create bot");
 
-        assert!(channel.is_user_allowed("anyone"));
+        assert!(bot.is_user_allowed("anyone"));
     }
 }
