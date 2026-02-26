@@ -189,18 +189,27 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
 
     // Anthropic uses a different API format — special case
     if provider == "anthropic" {
-        let api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey("Set ANTHROPIC_API_KEY environment variable".to_string())
-            })?;
+        // Try Claude Code OAuth token first
+        let (auth_token, use_oauth) = if let Ok(oauth_token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+            (oauth_token, true)
+        } else {
+            // Fall back to standard API key
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .ok_or_else(|| {
+                    LlmError::MissingApiKey(
+                        "Anthropic authentication required. Set ANTHROPIC_API_KEY or run inside Claude Code".to_string()
+                    )
+                })?;
+            (api_key, false)
+        };
         let base_url = config
             .base_url
             .clone()
             .unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string());
-        return Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url)));
+        return Ok(Arc::new(anthropic::AnthropicDriver::new(auth_token, base_url, use_oauth)));
     }
 
     // Gemini uses a different API format — special case

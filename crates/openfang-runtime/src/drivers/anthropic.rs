@@ -19,15 +19,17 @@ pub struct AnthropicDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    use_oauth: bool,
 }
 
 impl AnthropicDriver {
     /// Create a new Anthropic driver.
-    pub fn new(api_key: String, base_url: String) -> Self {
+    pub fn new(api_key: String, base_url: String, use_oauth: bool) -> Self {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
             client: reqwest::Client::new(),
+            use_oauth,
         }
     }
 }
@@ -201,10 +203,14 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic API request");
 
-            let resp = self
-                .client
-                .post(&url)
-                .header("x-api-key", self.api_key.as_str())
+            // Set authentication header based on token type
+            let mut req_builder = self.client.post(&url);
+            if self.use_oauth {
+                req_builder = req_builder.header("authorization", format!("Bearer {}", self.api_key.as_str()));
+            } else {
+                req_builder = req_builder.header("x-api-key", self.api_key.as_str());
+            }
+            let resp = req_builder
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&api_request)
@@ -308,10 +314,14 @@ impl LlmDriver for AnthropicDriver {
             let url = format!("{}/v1/messages", self.base_url);
             debug!(url = %url, attempt, "Sending Anthropic streaming request");
 
-            let resp = self
-                .client
-                .post(&url)
-                .header("x-api-key", self.api_key.as_str())
+            // Set authentication header based on token type
+            let mut req_builder = self.client.post(&url);
+            if self.use_oauth {
+                req_builder = req_builder.header("authorization", format!("Bearer {}", self.api_key.as_str()));
+            } else {
+                req_builder = req_builder.header("x-api-key", self.api_key.as_str());
+            }
+            let resp = req_builder
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&api_request)
