@@ -28,6 +28,9 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Find an agent by name, returning its ID.
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String>;
 
+    /// Find an agent by email address, returning its ID.
+    async fn find_agent_by_email(&self, email: &str) -> Result<Option<AgentId>, String>;
+
     /// List running agents as (id, name) pairs.
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String>;
 
@@ -568,11 +571,83 @@ async fn dispatch_message(
     }
 
     // Route to agent (standard path)
-    let agent_id = router.resolve(
-        &message.channel,
-        &message.sender.platform_id,
-        message.sender.openfang_user.as_deref(),
-    );
+    // Priority 1: Check if message has recipient email (most specific)
+    let agent_id = if let Some(recipient_email_val) = message.metadata.get("recipient_email") {
+        if let Some(recipient_email) = recipient_email_val.as_str() {
+            // Lookup agent by email address
+            match handle.find_agent_by_email(recipient_email).await {
+                Ok(Some(id)) => {
+                    debug!(
+                        "Routing message to agent {} via recipient email: {}",
+                        id, recipient_email
+                    );
+                    Some(id)
+                }
+                Ok(None) => {
+                    debug!("No agent found for recipient email: {}", recipient_email);
+                    None // Fall through to other routing methods
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to lookup agent by email '{}': {}",
+                        recipient_email, e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Priority 2: Check if message has explicit target_agent_name (e.g., from email [agent-name] subject tag routing)
+    let agent_id = if agent_id.is_none() {
+        if let Some(agent_name_val) = message.metadata.get("target_agent_name") {
+            if let Some(agent_name) = agent_name_val.as_str() {
+                // Lookup agent by name
+                match handle.find_agent_by_name(agent_name).await {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        send_response(
+                            adapter,
+                            &message.sender,
+                            format!(
+                                "Agent '{}' not found. Use /agents to list available agents.",
+                                agent_name
+                            ),
+                            thread_id,
+                            output_format,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Failed to lookup agent by name '{}': {}", agent_name, e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        agent_id
+    };
+
+    // Priority 4: Use router resolution (default behavior)
+    let agent_id = if agent_id.is_none() {
+        router.resolve(
+            &message.channel,
+            &message.sender.platform_id,
+            message.sender.openfang_user.as_deref(),
+        )
+    } else {
+        agent_id
+    };
 
     let agent_id = match agent_id {
         Some(id) => id,
@@ -942,6 +1017,10 @@ mod tests {
         async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
             let agents = self.agents.lock().unwrap();
             Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+        }
+        async fn find_agent_by_email(&self, _email: &str) -> Result<Option<AgentId>, String> {
+            // Mock implementation - always returns None
+            Ok(None)
         }
         async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
             Ok(self.agents.lock().unwrap().clone())

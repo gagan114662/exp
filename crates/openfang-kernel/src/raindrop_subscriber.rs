@@ -3,26 +3,22 @@
 use openfang_types::config::RaindropConfig;
 use openfang_types::raindrop::{RaindropIncident, RaindropSeverity};
 use reqwest::Client;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Raindrop incident subscriber.
 pub struct RaindropSubscriber {
     config: RaindropConfig,
-    telegram_bot: Arc<openfang_telegram::TelegramBot>,
+    telegram_bot_token: Option<String>,
     client: Client,
 }
 
 impl RaindropSubscriber {
     /// Create a new Raindrop subscriber.
-    pub fn new(
-        config: RaindropConfig,
-        telegram_bot: Arc<openfang_telegram::TelegramBot>,
-    ) -> Self {
+    pub fn new(config: RaindropConfig, telegram_bot_token: Option<String>) -> Self {
         Self {
             config,
-            telegram_bot,
+            telegram_bot_token,
             client: Client::new(),
         }
     }
@@ -49,7 +45,10 @@ impl RaindropSubscriber {
     }
 
     async fn try_subscribe(&self) -> Result<(), String> {
-        let url = format!("{}/v1/incidents/stream", self.config.api_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/incidents/stream",
+            self.config.api_url.trim_end_matches('/')
+        );
 
         let mut request = self.client.get(&url);
         if let Some(ref token) = self.config.api_token {
@@ -89,10 +88,15 @@ impl RaindropSubscriber {
 
     async fn forward_incident(&self, incident: RaindropIncident) -> Result<(), String> {
         // Look up chat_id for workspace
-        let chat_id = self.config.workspace_chat_mapping
+        let chat_id = self
+            .config
+            .workspace_chat_mapping
             .get(&incident.workspace_id)
             .ok_or_else(|| {
-                format!("No chat_id configured for workspace {}", incident.workspace_id)
+                format!(
+                    "No chat_id configured for workspace {}",
+                    incident.workspace_id
+                )
             })?;
 
         // Format incident message
@@ -121,10 +125,37 @@ impl RaindropSubscriber {
             incident.latest_message
         );
 
-        let chat_id_str = chat_id.to_string();
-        self.telegram_bot.send_message(&chat_id_str, &text).await?;
+        // Send message via Telegram Bot API directly
+        let bot_token = self
+            .telegram_bot_token
+            .as_ref()
+            .ok_or_else(|| "Telegram bot token not configured".to_string())?;
 
-        info!("Forwarded incident {} to Telegram", incident.id);
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        });
+
+        debug!("Sending Telegram message to chat_id {}", chat_id);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send Telegram request: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Telegram API error: {} - {}", status, body);
+            return Err(format!("Telegram API returned {}: {}", status, body));
+        }
+
+        info!("✅ Forwarded incident {} to Telegram", incident.id);
         Ok(())
     }
 }

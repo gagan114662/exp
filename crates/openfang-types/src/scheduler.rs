@@ -334,36 +334,33 @@ impl CronJob {
 // Cron expression basic format validation
 // ---------------------------------------------------------------------------
 
-/// Basic cron expression format validation: must have exactly 5 whitespace-separated fields.
-/// Actual parsing and scheduling is done in the kernel crate.
+/// Validates cron expression by actually parsing it with the cron crate.
+/// This ensures that invalid expressions are caught early at creation time.
+///
+/// The cron crate requires 6 or 7 fields (with seconds), but we accept standard
+/// 5-field cron expressions and automatically prepend "0 " for the seconds field.
 fn validate_cron_expr(expr: &str) -> Result<(), String> {
+    use std::str::FromStr;
+
     let trimmed = expr.trim();
     if trimmed.is_empty() {
         return Err("cron expression must not be empty".into());
     }
+
+    // Check if this is a 5-field expression (standard cron format)
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Err(format!(
-            "cron expression must have exactly 5 fields (got {}): \"{}\"",
-            fields.len(),
-            trimmed
-        ));
+    let expr_to_validate = if fields.len() == 5 {
+        // Prepend "0 " for seconds field to make it 6-field format
+        format!("0 {}", trimmed)
+    } else {
+        trimmed.to_string()
+    };
+
+    // Use the cron crate to validate the expression
+    match cron::Schedule::from_str(&expr_to_validate) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Invalid cron expression '{}': {}", trimmed, e)),
     }
-    // Basic character validation per field — allow digits, *, /, -, and ,.
-    for (i, field) in fields.iter().enumerate() {
-        if field.is_empty() {
-            return Err(format!("cron field {i} is empty"));
-        }
-        if !field
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | '-' | ',' | '?'))
-        {
-            return Err(format!(
-                "cron field {i} contains invalid characters: \"{field}\""
-            ));
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -566,18 +563,18 @@ mod tests {
             tz: None,
         };
         let err = job.validate(0).unwrap_err();
-        assert!(err.contains("5 fields"), "{err}");
+        assert!(err.contains("Invalid"), "{err}");
     }
 
     #[test]
-    fn cron_invalid_chars() {
+    fn cron_day_names_ok() {
+        // The cron crate 0.15+ supports day names (MON, TUE, etc.)
         let mut job = valid_job();
         job.schedule = CronSchedule::Cron {
             expr: "0 9 * * MON".into(),
             tz: None,
         };
-        let err = job.validate(0).unwrap_err();
-        assert!(err.contains("invalid characters"), "{err}");
+        assert!(job.validate(0).is_ok());
     }
 
     // -- Action: SystemEvent --
@@ -845,14 +842,15 @@ mod tests {
     }
 
     #[test]
-    fn cron_six_fields_rejected() {
+    fn cron_six_fields_accepted() {
+        // The cron crate actually accepts 6-field expressions (with seconds)
+        // This is a valid expression: "seconds minutes hours day-of-month month day-of-week"
         let mut job = valid_job();
         job.schedule = CronSchedule::Cron {
             expr: "0 0 9 * * 1".into(),
             tz: None,
         };
-        let err = job.validate(0).unwrap_err();
-        assert!(err.contains("5 fields"), "{err}");
+        assert!(job.validate(0).is_ok());
     }
 
     #[test]

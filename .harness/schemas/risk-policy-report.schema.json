@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openfang.dev/schemas/risk-policy-report.schema.json",
+  "title": "RiskPolicyReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pr_number",
+    "head_sha",
+    "risk_tier",
+    "changed_files",
+    "required_checks",
+    "review_state",
+    "actionable_findings_count",
+    "decision",
+    "reasons",
+    "timestamp"
+  ],
+  "properties": {
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "risk_tier": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "review_state": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["provider", "status"],
+      "properties": {
+        "provider": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["success", "failure", "pending", "missing", "timeout", "stale", "error"]
+        },
+        "details": {"type": "string"},
+        "check_run_url": {"type": "string"}
+      }
+    },
+    "actionable_findings_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["pass", "fail", "needs-remediation", "stale-review", "timeout"]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rollout_phase": {
+      "type": "string"
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

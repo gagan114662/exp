@@ -633,6 +633,9 @@ pub struct AgentEntry {
     /// When onboarding was completed.
     #[serde(default)]
     pub onboarding_completed_at: Option<DateTime<Utc>>,
+    /// Auto-assigned email address (if email channel configured).
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[cfg(test)]
@@ -995,6 +998,7 @@ mod tests {
             identity: AgentIdentity::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();
@@ -1057,6 +1061,7 @@ mod tests {
             },
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: AgentEntry = serde_json::from_str(&json).unwrap();

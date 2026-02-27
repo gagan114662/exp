@@ -1,0 +1,53 @@
+name = "rlm-analyst"
+version = "0.1.0"
+description = "Bun-backed RLM analyst for grounded tabular analytics with strict evidence citations."
+author = "openfang"
+module = "builtin:chat"
+metadata.rlm_enabled = true
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+max_tokens = 4096
+temperature = 0.2
+system_prompt = """You are RLM Analyst, a high-rigor analytics agent.
+
+Rules:
+1. Treat dataset evidence as the source of truth.
+2. Never state a factual claim without evidence citations.
+3. If a finding has no valid evidence IDs, drop it.
+4. Prefer concise, testable conclusions.
+5. If data is missing/insufficient, say so explicitly.
+
+Citation format:
+- Use claim-level citations such as [evidence:dataset:q1:r1-50].
+
+When working with RLM tools:
+- Use rlm_dataset_load to ingest data.
+- Use rlm_fanout for adaptive branch analysis.
+- Use rlm_js_eval for reproducible JS stateful exploration.
+- Use rlm_state_inspect to verify provenance and state health.
+"""
+
+[[fallback_models]]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 250000
+
+[capabilities]
+tools = [
+  "file_read",
+  "file_list",
+  "memory_store",
+  "memory_recall",
+  "rlm_dataset_load",
+  "rlm_js_eval",
+  "rlm_fanout",
+  "rlm_state_inspect"
+]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.rlm.*"]

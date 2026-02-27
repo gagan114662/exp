@@ -937,6 +937,51 @@ pub async fn get_agent(
     )
 }
 
+/// GET /api/agents/:id/email — Get the auto-assigned email address for an agent.
+pub async fn get_agent_email(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Check if agent exists and get email from persisted entry
+    let agent_entry = match state.kernel.registry.get(agent_id) {
+        Some(entry) => entry,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            );
+        }
+    };
+
+    // Check if agent has an email address (read from persisted entry)
+    match &agent_entry.email {
+        Some(email) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "email": email.clone(),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "No email address assigned to this agent",
+                "hint": "Email addresses are auto-assigned when the email channel is configured with an email_domain"
+            })),
+        ),
+    }
+}
+
 /// POST /api/agents/:id/message/stream — SSE streaming response.
 pub async fn send_message_stream(
     State(state): State<Arc<AppState>>,
@@ -5280,6 +5325,9 @@ pub async fn mcp_http(
                 None
             },
             Some(&*state.kernel.process_manager),
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
 
@@ -6038,6 +6086,159 @@ fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::E
 
 // ── Config.toml channel management helpers ──────────────────────────
 
+/// Field type for type-safe config serialization.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum ConfigFieldType {
+    String,
+    Integer,
+    IntegerArray,
+    StringArray,
+    Boolean,
+}
+
+/// Get the expected type for a channel config field.
+/// This ensures we write the correct TOML type instead of always using strings.
+fn get_config_field_type(channel: &str, field: &str) -> ConfigFieldType {
+    match (channel, field) {
+        // Telegram
+        ("telegram", "poll_interval_secs") => ConfigFieldType::Integer,
+        ("telegram", "allowed_users") => ConfigFieldType::IntegerArray,
+
+        // Discord
+        ("discord", "intents") => ConfigFieldType::Integer,
+        ("discord", "allowed_guilds") => ConfigFieldType::IntegerArray,
+
+        // Slack (channel IDs are strings, not integers)
+        ("slack", "allowed_channels") => ConfigFieldType::StringArray,
+
+        // Matrix (room IDs are strings, not integers)
+        ("matrix", "allowed_rooms") => ConfigFieldType::StringArray,
+
+        // Email
+        ("email", "imap_port") => ConfigFieldType::Integer,
+        ("email", "smtp_port") => ConfigFieldType::Integer,
+        ("email", "poll_interval_secs") => ConfigFieldType::Integer,
+
+        // WhatsApp webhook ports
+        ("whatsapp", "webhook_port") => ConfigFieldType::Integer,
+
+        // Line webhook ports
+        ("line", "webhook_port") => ConfigFieldType::Integer,
+
+        // Viber webhook ports
+        ("viber", "webhook_port") => ConfigFieldType::Integer,
+
+        // Teams
+        ("teams", "webhook_port") => ConfigFieldType::Integer,
+        ("teams", "allowed_tenants") => ConfigFieldType::StringArray,
+
+        // Google Chat
+        ("google_chat", "webhook_port") => ConfigFieldType::Integer,
+        ("google_chat", "space_ids") => ConfigFieldType::StringArray,
+
+        // Messenger webhook ports
+        ("messenger", "webhook_port") => ConfigFieldType::Integer,
+
+        // Threema webhook ports
+        ("threema", "webhook_port") => ConfigFieldType::Integer,
+
+        // Feishu webhook ports
+        ("feishu", "webhook_port") => ConfigFieldType::Integer,
+
+        // Pumble webhook ports
+        ("pumble", "webhook_port") => ConfigFieldType::Integer,
+
+        // Flock webhook ports
+        ("flock", "webhook_port") => ConfigFieldType::Integer,
+
+        // DingTalk webhook ports
+        ("dingtalk", "webhook_port") => ConfigFieldType::Integer,
+
+        // Reddit arrays
+        ("reddit", "subreddits") => ConfigFieldType::StringArray,
+
+        // Nostr arrays
+        ("nostr", "relays") => ConfigFieldType::StringArray,
+
+        // Zulip arrays
+        ("zulip", "streams") => ConfigFieldType::StringArray,
+
+        // Twitch arrays
+        ("twitch", "channels") => ConfigFieldType::StringArray,
+
+        // IRC arrays
+        ("irc", "channels") => ConfigFieldType::StringArray,
+
+        // RocketChat arrays
+        ("rocket_chat", "allowed_channels") => ConfigFieldType::StringArray,
+
+        // XMPP arrays
+        ("xmpp", "rooms") => ConfigFieldType::StringArray,
+
+        // Keybase arrays
+        ("keybase", "allowed_teams") => ConfigFieldType::StringArray,
+
+        // Webex arrays
+        ("webex", "allowed_rooms") => ConfigFieldType::StringArray,
+
+        // Twist arrays
+        ("twist", "allowed_channels") => ConfigFieldType::StringArray,
+
+        // Nextcloud arrays
+        ("nextcloud", "allowed_rooms") => ConfigFieldType::StringArray,
+
+        // Default to string for unknown fields
+        _ => ConfigFieldType::String,
+    }
+}
+
+/// Convert a string value to the appropriate TOML type based on the field schema.
+fn value_to_toml(value: &str, field_type: ConfigFieldType) -> Result<toml::Value, String> {
+    Ok(match field_type {
+        ConfigFieldType::String => toml::Value::String(value.to_string()),
+        ConfigFieldType::Integer => {
+            let n = value
+                .parse::<i64>()
+                .map_err(|_| format!("'{}' is not a valid integer", value))?;
+            toml::Value::Integer(n)
+        }
+        ConfigFieldType::IntegerArray => {
+            if value.trim().is_empty() {
+                // Empty string = empty array
+                toml::Value::Array(vec![])
+            } else {
+                let items: Vec<i64> = value
+                    .split(',')
+                    .map(|s| s.trim().parse::<i64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| {
+                        format!(
+                            "'{}' is not a valid comma-separated list of integers",
+                            value
+                        )
+                    })?;
+                toml::Value::Array(items.into_iter().map(toml::Value::Integer).collect())
+            }
+        }
+        ConfigFieldType::StringArray => {
+            if value.trim().is_empty() {
+                // Empty string = empty array
+                toml::Value::Array(vec![])
+            } else {
+                let items: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
+                toml::Value::Array(items.into_iter().map(toml::Value::String).collect())
+            }
+        }
+        ConfigFieldType::Boolean => {
+            let b = value
+                .parse::<bool>()
+                .map_err(|_| format!("'{}' is not a valid boolean (true/false)", value))?;
+            toml::Value::Boolean(b)
+        }
+    })
+}
+
 /// Upsert a `[channels.<name>]` section in config.toml with the given non-secret fields.
 fn upsert_channel_config(
     config_path: &std::path::Path,
@@ -6070,10 +6271,18 @@ fn upsert_channel_config(
         .and_then(|v| v.as_table_mut())
         .ok_or("channels is not a table")?;
 
-    // Build channel sub-table
+    // Build channel sub-table with type-aware conversion
     let mut ch_table = toml::map::Map::new();
     for (k, v) in fields {
-        ch_table.insert(k.clone(), toml::Value::String(v.clone()));
+        let field_type = get_config_field_type(channel_name, k);
+        match value_to_toml(v, field_type) {
+            Ok(typed_value) => {
+                ch_table.insert(k.clone(), typed_value);
+            }
+            Err(e) => {
+                return Err(format!("Invalid value for field '{}': {}", k, e).into());
+            }
+        }
     }
     channels_table.insert(channel_name.to_string(), toml::Value::Table(ch_table));
 
@@ -7182,7 +7391,14 @@ pub async fn get_agent_file(
 pub async fn get_video_recording(
     State(state): State<Arc<AppState>>,
     Path((agent_id, task_id)): Path<(String, String)>,
-) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 1], Vec<u8>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<
+    (
+        StatusCode,
+        [(axum::http::HeaderName, &'static str); 1],
+        Vec<u8>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
     if !state.kernel.video_renderer.is_enabled() {
         return Err((
             StatusCode::NOT_FOUND,

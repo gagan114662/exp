@@ -15,9 +15,8 @@ use openfang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL,
     FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL,
     MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
-    ZHIPU_BASE_URL,
+    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL, ZHIPU_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -190,7 +189,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
     // Anthropic uses a different API format — special case
     if provider == "anthropic" {
         // Try Claude Code OAuth token first
-        let (auth_token, use_oauth) = if let Ok(oauth_token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        let (auth_token, use_oauth) = if let Ok(oauth_token) =
+            std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+        {
             (oauth_token, true)
         } else {
             // Fall back to standard API key
@@ -209,7 +210,9 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             .base_url
             .clone()
             .unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string());
-        return Ok(Arc::new(anthropic::AnthropicDriver::new(auth_token, base_url, use_oauth)));
+        return Ok(Arc::new(anthropic::AnthropicDriver::new(
+            auth_token, base_url, use_oauth,
+        )));
     }
 
     // Gemini uses a different API format — special case

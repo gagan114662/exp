@@ -213,7 +213,8 @@ openfang doctor [--json] [--repair]
 10. **LLM provider keys** -- checks env vars for 10 providers (Groq, OpenRouter, Anthropic, OpenAI, DeepSeek, Gemini, Google, Together, Mistral, Fireworks), performs live validation (401/403 detection)
 11. **Channel tokens** -- format validation for Telegram, Discord, Slack tokens
 12. **Config consistency** -- checks that `api_key_env` references in config match actual environment variables
-13. **Rust toolchain** -- `rustc --version`
+13. **RLM Bun prerequisite** -- when `[rlm].enabled=true`, verifies `rlm.bun_path --version`
+14. **Rust toolchain** -- `rustc --version`
 
 **Example:**
 
@@ -988,6 +989,7 @@ openfang chat [<AGENT>]
 
 - **Daemon mode:** Finds the agent by name or ID among running agents. If no agent name is given, uses the first available agent. If no agents exist, suggests `openfang agent new`.
 - **Standalone mode (no daemon):** Boots an in-process kernel and auto-spawns an agent from templates. Searches for an agent matching the given name, then falls back to `assistant`, then to the first available template.
+- **RLM analyst mode:** `openfang chat rlm-analyst` enables Bun-backed auto analytics when both `metadata.rlm_enabled=true` in the agent template and `[rlm].enabled=true` in config.
 
 This is the simplest way to start chatting -- it works with or without a daemon.
 

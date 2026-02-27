@@ -120,6 +120,22 @@ pub async fn run_agent_loop(
 ) -> OpenFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Start Sentry transaction for performance monitoring
+    let transaction = sentry::start_transaction(sentry::TransactionContext::new(
+        "agent.loop",
+        "ai-inference",
+    ));
+    sentry::configure_scope(|scope| {
+        scope.set_span(Some(transaction.clone().into()));
+    });
+
+    // Set transaction metadata
+    transaction.set_data("agent_name", manifest.name.clone().into());
+    transaction.set_data("agent_id", session.agent_id.to_string().into());
+    transaction.set_data("model", manifest.model.model.clone().into());
+    transaction.set_data("provider", manifest.model.provider.clone().into());
+    transaction.set_data("user_message_len", user_message.len().into());
+
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
         .metadata
@@ -201,8 +217,36 @@ pub async fn run_agent_loop(
         system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
     }
 
+    // RLM auto-mode for dedicated RLM-enabled agents.
+    let mut effective_user_message = user_message.to_string();
+    let mut rlm_auto_context_applied = false;
+    if crate::rlm::agent_rlm_enabled(manifest) {
+        let session_id = session.id.to_string();
+        let caller_agent_id = session.agent_id.to_string();
+        match crate::rlm::maybe_prepare_auto_context(
+            manifest,
+            user_message,
+            &session_id,
+            &caller_agent_id,
+            kernel.as_ref(),
+            workspace_root,
+            &driver,
+        )
+        .await
+        {
+            Ok(Some(rlm_ctx)) => {
+                rlm_auto_context_applied = rlm_ctx.contains("[RLM AUTO-MODE EVIDENCE]");
+                effective_user_message.push_str(&rlm_ctx);
+            }
+            Ok(None) => {}
+            Err(e) => warn!(agent = %manifest.name, error = %e, "RLM auto-mode prepass failed"),
+        }
+    }
+
     // Add the user message to session history
-    session.messages.push(Message::user(user_message));
+    session
+        .messages
+        .push(Message::user(effective_user_message.clone()));
 
     // Build the messages for the LLM, filtering system messages
     // System prompt goes into the separate `system` field
@@ -361,7 +405,7 @@ pub async fn run_agent_loop(
                 }
 
                 // Guard against empty response — covers both iteration 0 and post-tool cycles
-                let text = if text.trim().is_empty() {
+                let mut text = if text.trim().is_empty() {
                     warn!(
                         agent = %manifest.name,
                         iteration,
@@ -378,6 +422,20 @@ pub async fn run_agent_loop(
                 } else {
                     text
                 };
+                if crate::rlm::agent_rlm_enabled(manifest) && rlm_auto_context_applied {
+                    let session_id = session.id.to_string();
+                    let caller_agent_id = session.agent_id.to_string();
+                    if let Ok(with_citations) = crate::rlm::enforce_response_citations(
+                        &text,
+                        &session_id,
+                        &caller_agent_id,
+                        kernel.as_ref(),
+                    )
+                    .await
+                    {
+                        text = with_citations;
+                    }
+                }
                 final_response = text.clone();
                 session.messages.push(Message::assistant(text));
 
@@ -392,7 +450,7 @@ pub async fn run_agent_loop(
                 // Remember this interaction (with embedding if available)
                 let interaction_text = format!(
                     "User asked: {}\nI responded: {}",
-                    user_message, final_response
+                    effective_user_message, final_response
                 );
                 if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
@@ -596,6 +654,9 @@ pub async fn run_agent_loop(
                             tts_engine,
                             docker_config,
                             process_manager,
+                            Some(&driver),
+                            Some(&manifest.model.model),
+                            manifest.routing.as_ref(),
                         ),
                     )
                     .await
@@ -743,6 +804,25 @@ async fn call_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
 ) -> OpenFangResult<crate::llm_driver::CompletionResponse> {
+    // Start Sentry span for this LLM call
+    let span = sentry::configure_scope(|scope| {
+        scope.get_span().map(|parent| {
+            let child = parent.start_child("llm.completion", "LLM API call with retry logic");
+
+            // Add metadata
+            if let Some(p) = provider {
+                child.set_data("provider", p.to_string().into());
+            }
+            child.set_data("model", request.model.clone().into());
+            child.set_data("max_tokens", request.max_tokens.into());
+            child.set_data("temperature", f64::from(request.temperature).into());
+            child.set_data("message_count", request.messages.len().into());
+            child.set_data("tool_count", request.tools.len().into());
+
+            child
+        })
+    });
+
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
         match cooldown.check(provider) {
@@ -750,12 +830,29 @@ async fn call_with_retry(
                 reason,
                 retry_after_secs,
             } => {
+                // Circuit breaker blocked - report to Sentry
+                if let Some(sp) = span {
+                    sp.set_data("circuit_breaker", "blocked".into());
+                    sp.set_data("retry_after_secs", retry_after_secs.into());
+                    sp.set_status(sentry::protocol::SpanStatus::FailedPrecondition);
+                    sp.finish();
+                }
+                sentry::add_breadcrumb(sentry::Breadcrumb {
+                    message: Some(format!("Circuit breaker blocked: {reason}")),
+                    level: sentry::Level::Warning,
+                    ..Default::default()
+                });
                 return Err(OpenFangError::LlmDriver(format!(
                     "Provider '{provider}' is in cooldown ({reason}). Retry in {retry_after_secs}s."
                 )));
             }
             CooldownVerdict::AllowProbe => {
                 debug!(provider, "Allowing probe request through circuit breaker");
+                sentry::add_breadcrumb(sentry::Breadcrumb {
+                    message: Some("Circuit breaker allowing probe".to_string()),
+                    level: sentry::Level::Info,
+                    ..Default::default()
+                });
             }
             CooldownVerdict::Allow => {}
         }
@@ -764,8 +861,37 @@ async fn call_with_retry(
     let mut last_error = None;
 
     for attempt in 0..=MAX_RETRIES {
+        // Add breadcrumb for each attempt
+        sentry::add_breadcrumb(sentry::Breadcrumb {
+            message: Some(format!(
+                "LLM call attempt {}/{}",
+                attempt + 1,
+                MAX_RETRIES + 1
+            )),
+            level: sentry::Level::Info,
+            ..Default::default()
+        });
+
+        let start = std::time::Instant::now();
         match driver.complete(request.clone()).await {
             Ok(response) => {
+                let duration = start.elapsed();
+
+                // SUCCESS - Record metrics to Sentry
+                if let Some(sp) = span {
+                    sp.set_data("attempt", (attempt + 1).into());
+                    sp.set_data("input_tokens", response.usage.input_tokens.into());
+                    sp.set_data("output_tokens", response.usage.output_tokens.into());
+                    sp.set_data(
+                        "total_tokens",
+                        (response.usage.input_tokens + response.usage.output_tokens).into(),
+                    );
+                    sp.set_data("duration_ms", (duration.as_millis() as u64).into());
+                    sp.set_data("stop_reason", format!("{:?}", response.stop_reason).into());
+                    sp.set_status(sentry::protocol::SpanStatus::Ok);
+                    sp.finish();
+                }
+
                 // Record success with circuit breaker
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_success(provider);
@@ -773,7 +899,31 @@ async fn call_with_retry(
                 return Ok(response);
             }
             Err(LlmError::RateLimited { retry_after_ms }) => {
+                sentry::add_breadcrumb(sentry::Breadcrumb {
+                    message: Some(format!(
+                        "Rate limit hit (attempt {}/{}), retry after {}ms",
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        retry_after_ms
+                    )),
+                    level: sentry::Level::Warning,
+                    ..Default::default()
+                });
+
                 if attempt == MAX_RETRIES {
+                    // Final failure - report error to Sentry
+                    if let Some(sp) = span {
+                        sp.set_data("error_category", "rate_limit".into());
+                        sp.set_data("attempt", (attempt + 1).into());
+                        sp.set_data("retry_after_ms", retry_after_ms.into());
+                        sp.set_status(sentry::protocol::SpanStatus::ResourceExhausted);
+                        sp.finish();
+                    }
+                    sentry::capture_message(
+                        &format!("Rate limited after {} retries", MAX_RETRIES),
+                        sentry::Level::Error,
+                    );
+
                     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                         cooldown.record_failure(provider, false);
                     }
@@ -820,6 +970,62 @@ async fn call_with_retry(
                     raw = %raw_error,
                     "LLM error classified: {}",
                     classified.sanitized_message
+                );
+
+                // Report error to Sentry with classification metadata
+                sentry::add_breadcrumb(sentry::Breadcrumb {
+                    message: Some(format!(
+                        "LLM error: {:?} (retryable: {}, billing: {})",
+                        classified.category, classified.is_retryable, classified.is_billing
+                    )),
+                    level: sentry::Level::Error,
+                    ..Default::default()
+                });
+
+                if let Some(sp) = span {
+                    sp.set_data(
+                        "error_category",
+                        format!("{:?}", classified.category).into(),
+                    );
+                    sp.set_data("error_retryable", classified.is_retryable.into());
+                    sp.set_data("error_billing", classified.is_billing.into());
+                    sp.set_data("attempt", (attempt + 1).into());
+                    sp.set_status(match classified.category {
+                        llm_errors::LlmErrorCategory::RateLimit => {
+                            sentry::protocol::SpanStatus::ResourceExhausted
+                        }
+                        llm_errors::LlmErrorCategory::Auth => {
+                            sentry::protocol::SpanStatus::Unauthenticated
+                        }
+                        llm_errors::LlmErrorCategory::Billing => {
+                            sentry::protocol::SpanStatus::PermissionDenied
+                        }
+                        llm_errors::LlmErrorCategory::Timeout => {
+                            sentry::protocol::SpanStatus::DeadlineExceeded
+                        }
+                        _ => sentry::protocol::SpanStatus::InternalError,
+                    });
+                    sp.finish();
+                }
+
+                // Capture error event with context
+                sentry::with_scope(
+                    |scope| {
+                        scope.set_tag("error_category", format!("{:?}", classified.category));
+                        scope.set_tag("is_retryable", classified.is_retryable.to_string());
+                        scope.set_tag("is_billing", classified.is_billing.to_string());
+                        if let Some(p) = provider {
+                            scope.set_tag("provider", p);
+                        }
+                        scope.set_extra("raw_error", raw_error.clone().into());
+                        scope.set_extra(
+                            "sanitized_message",
+                            classified.sanitized_message.clone().into(),
+                        );
+                    },
+                    || {
+                        sentry::capture_message(&raw_error, sentry::Level::Error);
+                    },
                 );
 
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
@@ -1063,8 +1269,36 @@ pub async fn run_agent_loop_streaming(
         system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
     }
 
+    // RLM auto-mode for dedicated RLM-enabled agents.
+    let mut effective_user_message = user_message.to_string();
+    let mut rlm_auto_context_applied = false;
+    if crate::rlm::agent_rlm_enabled(manifest) {
+        let session_id = session.id.to_string();
+        let caller_agent_id = session.agent_id.to_string();
+        match crate::rlm::maybe_prepare_auto_context(
+            manifest,
+            user_message,
+            &session_id,
+            &caller_agent_id,
+            kernel.as_ref(),
+            workspace_root,
+            &driver,
+        )
+        .await
+        {
+            Ok(Some(rlm_ctx)) => {
+                rlm_auto_context_applied = rlm_ctx.contains("[RLM AUTO-MODE EVIDENCE]");
+                effective_user_message.push_str(&rlm_ctx);
+            }
+            Ok(None) => {}
+            Err(e) => warn!(agent = %manifest.name, error = %e, "RLM auto-mode prepass failed"),
+        }
+    }
+
     // Add the user message to session history
-    session.messages.push(Message::user(user_message));
+    session
+        .messages
+        .push(Message::user(effective_user_message.clone()));
 
     let llm_messages: Vec<Message> = session
         .messages
@@ -1238,7 +1472,7 @@ pub async fn run_agent_loop_streaming(
                 }
 
                 // Guard against empty response — covers both iteration 0 and post-tool cycles
-                let text = if text.trim().is_empty() {
+                let mut text = if text.trim().is_empty() {
                     warn!(
                         agent = %manifest.name,
                         iteration,
@@ -1255,6 +1489,20 @@ pub async fn run_agent_loop_streaming(
                 } else {
                     text
                 };
+                if crate::rlm::agent_rlm_enabled(manifest) && rlm_auto_context_applied {
+                    let session_id = session.id.to_string();
+                    let caller_agent_id = session.agent_id.to_string();
+                    if let Ok(with_citations) = crate::rlm::enforce_response_citations(
+                        &text,
+                        &session_id,
+                        &caller_agent_id,
+                        kernel.as_ref(),
+                    )
+                    .await
+                    {
+                        text = with_citations;
+                    }
+                }
                 final_response = text.clone();
                 session.messages.push(Message::assistant(text));
 
@@ -1268,7 +1516,7 @@ pub async fn run_agent_loop_streaming(
                 // Remember this interaction (with embedding if available)
                 let interaction_text = format!(
                     "User asked: {}\nI responded: {}",
-                    user_message, final_response
+                    effective_user_message, final_response
                 );
                 if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
@@ -1468,6 +1716,9 @@ pub async fn run_agent_loop_streaming(
                             tts_engine,
                             docker_config,
                             process_manager,
+                            Some(&driver),
+                            Some(&manifest.model.model),
+                            manifest.routing.as_ref(),
                         ),
                     )
                     .await

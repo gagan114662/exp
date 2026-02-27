@@ -206,7 +206,8 @@ impl LlmDriver for AnthropicDriver {
             // Set authentication header based on token type
             let mut req_builder = self.client.post(&url);
             if self.use_oauth {
-                req_builder = req_builder.header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                req_builder = req_builder
+                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
             } else {
                 req_builder = req_builder.header("x-api-key", self.api_key.as_str());
             }
@@ -317,7 +318,8 @@ impl LlmDriver for AnthropicDriver {
             // Set authentication header based on token type
             let mut req_builder = self.client.post(&url);
             if self.use_oauth {
-                req_builder = req_builder.header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                req_builder = req_builder
+                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
             } else {
                 req_builder = req_builder.header("x-api-key", self.api_key.as_str());
             }

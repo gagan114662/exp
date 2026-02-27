@@ -1,0 +1,161 @@
+{
+  "version": "1.0.0",
+  "description": "OpenFang Harness Policy Contract - defines risk tiers, required checks, and rollout phases",
+  "rolloutPolicy": {
+    "currentPhase": "phase-0",
+    "runFanoutOnGateFailure": true,
+    "phases": {
+      "phase-0": {
+        "description": "Advisory baseline and metrics collection",
+        "enforceMergeBlock": false,
+        "enableRemediation": false
+      },
+      "phase-1": {
+        "description": "Block stale review/docs drift, pilot remediation on labeled PRs",
+        "enforceMergeBlock": true,
+        "enableRemediation": "labeled-only",
+        "remediationLabel": "harness-remediation-pilot"
+      },
+      "phase-2": {
+        "description": "Enforce constrained remediation + evidence requirements",
+        "enforceMergeBlock": true,
+        "enableRemediation": true,
+        "requireEvidence": true
+      },
+      "phase-3": {
+        "description": "Full hard enforcement",
+        "enforceMergeBlock": true,
+        "enableRemediation": true,
+        "requireEvidence": true,
+        "strictReview": true
+      }
+    }
+  },
+  "riskTiers": {
+    "critical": {
+      "description": "Changes to core runtime, kernel, or memory systems",
+      "paths": [
+        "crates/openfang-runtime/**",
+        "crates/openfang-kernel/**",
+        "crates/openfang-memory/**",
+        "crates/openfang-types/src/agent.rs",
+        "crates/openfang-types/src/capability.rs"
+      ],
+      "requiredChecks": [
+        "build",
+        "test",
+        "clippy",
+        "security-audit",
+        "integration-tests",
+        "code-review"
+      ],
+      "reviewPolicy": {
+        "minApprovals": 2,
+        "requireOwnerReview": true
+      }
+    },
+    "high": {
+      "description": "Changes to API, channels, or CLI",
+      "paths": [
+        "crates/openfang-api/**",
+        "crates/openfang-channels/**",
+        "crates/openfang-cli/**",
+        "crates/openfang-telegram/**"
+      ],
+      "requiredChecks": [
+        "build",
+        "test",
+        "clippy",
+        "integration-tests"
+      ],
+      "reviewPolicy": {
+        "minApprovals": 1
+      }
+    },
+    "medium": {
+      "description": "Changes to extensions, skills, or hands",
+      "paths": [
+        "crates/openfang-extensions/**",
+        "crates/openfang-skills/**",
+        "crates/openfang-hands/**",
+        "agents/**"
+      ],
+      "requiredChecks": [
+        "build",
+        "test",
+        "clippy"
+      ],
+      "reviewPolicy": {
+        "minApprovals": 1
+      }
+    },
+    "low": {
+      "description": "Documentation, configs, or scripts",
+      "paths": [
+        "docs/**",
+        "*.md",
+        "scripts/**",
+        "*.toml.example",
+        ".github/**"
+      ],
+      "requiredChecks": [
+        "docs-lint"
+      ],
+      "reviewPolicy": {
+        "minApprovals": 0
+      }
+    }
+  },
+  "docsDriftRules": {
+    "requireDocsUpdate": [
+      "crates/openfang-api/src/routes.rs",
+      "crates/openfang-types/src/config.rs"
+    ],
+    "docsFiles": [
+      "docs/configuration.md",
+      "docs/cli-reference.md",
+      "docs/architecture.md",
+      "README.md"
+    ],
+    "maxStaleDays": 30
+  },
+  "reviewPolicySemantics": {
+    "staleThresholdMinutes": 60,
+    "timeoutThresholdMinutes": 120,
+    "validStates": [
+      "success",
+      "queued",
+      "in_progress"
+    ],
+    "invalidStates": [
+      "failed",
+      "timeout",
+      "cancelled",
+      "skipped"
+    ]
+  },
+  "rerunCommentDedupeMarker": "<!-- greptile-rerun-request -->",
+  "remediationGuardrails": {
+    "allowedPaths": [
+      "crates/**/src/**/*.rs",
+      "tests/**/*.rs",
+      "docs/**/*.md"
+    ],
+    "blockedPaths": [
+      ".git/**",
+      ".github/**",
+      "target/**",
+      "Cargo.lock"
+    ],
+    "maxFilesPerPR": 10,
+    "maxLinesPerFile": 500
+  },
+  "browserEvidenceRequirements": {
+    "uiChangePaths": [
+      "crates/openfang-api/static/**",
+      "crates/openfang-desktop/**"
+    ],
+    "requiredScreenshots": 2,
+    "requireBeforeAfter": true
+  }
+}

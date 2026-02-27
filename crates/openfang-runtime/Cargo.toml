@@ -30,6 +30,12 @@ zeroize = { workspace = true }
 dashmap = { workspace = true }
 regex-lite = { workspace = true }
 headless_chrome = "1.0"
+rusqlite = { workspace = true }
+tokio-postgres = "0.7"
+native-tls = "0.2"
+postgres-native-tls = "0.5"
+sentry = { workspace = true }
+sentry-tracing = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

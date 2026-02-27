@@ -1279,7 +1279,7 @@ curl http://127.0.0.1:50051/api/agents/{agent_id}/recordings/{task_id} > test.mp
 cat >> ~/.openfang/config.toml << EOF
 [telegram]
 enabled = true
-bot_token = "8250681078:AAEyrZ4yWgfAZE1oTiv1_RJJAcWDCgnozvs"
+bot_token = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 allowed_users = ["YOUR_USER_ID"]
 EOF
 

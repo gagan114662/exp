@@ -61,8 +61,11 @@ impl VideoRenderer {
         if !self.is_ffmpeg_available() {
             // Fall back to saving raw audit log
             let json_path = agent_dir.join(format!("{}.json", task_id));
-            std::fs::write(&json_path, serde_json::to_string_pretty(&audit_events).unwrap())
-                .map_err(|e| format!("Failed to save audit log: {}", e))?;
+            std::fs::write(
+                &json_path,
+                serde_json::to_string_pretty(&audit_events).unwrap(),
+            )
+            .map_err(|e| format!("Failed to save audit log: {}", e))?;
 
             warn!("ffmpeg not available, saved audit log as JSON");
             return Ok(json_path);
@@ -91,9 +94,7 @@ impl VideoRenderer {
             return Ok(0);
         }
 
-        let max_age = std::time::Duration::from_secs(
-            self.config.retention_days as u64 * 24 * 3600
-        );
+        let max_age = std::time::Duration::from_secs(self.config.retention_days as u64 * 24 * 3600);
 
         let mut deleted = 0;
 
@@ -102,9 +103,7 @@ impl VideoRenderer {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
-                            if elapsed > max_age
-                                && std::fs::remove_file(entry.path()).is_ok()
-                            {
+                            if elapsed > max_age && std::fs::remove_file(entry.path()).is_ok() {
                                 deleted += 1;
                             }
                         }

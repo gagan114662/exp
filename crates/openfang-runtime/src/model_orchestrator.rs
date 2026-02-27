@@ -57,10 +57,7 @@ impl ModelOrchestrator {
             return TaskType::Research;
         }
 
-        if content.contains("code")
-            || content.contains("implement")
-            || content.contains("debug")
-        {
+        if content.contains("code") || content.contains("implement") || content.contains("debug") {
             return TaskType::Coding;
         }
 

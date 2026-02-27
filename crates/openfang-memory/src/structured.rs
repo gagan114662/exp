@@ -126,10 +126,16 @@ impl StructuredStore {
             [],
         );
 
+        // Add email column if it doesn't exist yet (migration compat)
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN email TEXT DEFAULT NULL",
+            [],
+        );
+
         conn.execute(
-            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7",
+            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, email)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, email = ?8",
             rusqlite::params![
                 entry.id.0.to_string(),
                 entry.name,
@@ -138,6 +144,7 @@ impl StructuredStore {
                 entry.created_at.to_rfc3339(),
                 now,
                 entry.session_id.0.to_string(),
+                entry.email,
             ],
         )
         .map_err(|e| OpenFangError::Memory(e.to_string()))?;
@@ -152,9 +159,13 @@ impl StructuredStore {
             .map_err(|e| OpenFangError::Internal(e.to_string()))?;
 
         let mut stmt = conn
-            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id FROM agents WHERE id = ?1")
+            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, email FROM agents WHERE id = ?1")
             .or_else(|_| {
-                // Fallback without session_id column for old DBs
+                // Fallback without email/session_id columns for old DBs
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id FROM agents WHERE id = ?1")
+            })
+            .or_else(|_| {
+                // Fallback without session_id column for older DBs
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents WHERE id = ?1")
             })
             .map_err(|e| OpenFangError::Memory(e.to_string()))?;
@@ -170,11 +181,16 @@ impl StructuredStore {
             } else {
                 None
             };
-            Ok((name, manifest_blob, state_str, created_str, session_id_str))
+            let email: Option<String> = if col_count >= 8 {
+                row.get(7).ok().flatten()
+            } else {
+                None
+            };
+            Ok((name, manifest_blob, state_str, created_str, session_id_str, email))
         });
 
         match result {
-            Ok((name, manifest_blob, state_str, created_str, session_id_str)) => {
+            Ok((name, manifest_blob, state_str, created_str, session_id_str, email)) => {
                 let manifest = rmp_serde::from_slice(&manifest_blob)
                     .map_err(|e| OpenFangError::Serialization(e.to_string()))?;
                 let state = serde_json::from_str(&state_str)
@@ -201,6 +217,7 @@ impl StructuredStore {
                     identity: Default::default(),
                     onboarding_completed: false,
                     onboarding_completed_at: None,
+                    email,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -234,11 +251,14 @@ impl StructuredStore {
             .lock()
             .map_err(|e| OpenFangError::Internal(e.to_string()))?;
 
-        // Try with session_id column first, fall back without
+        // Try with email + session_id columns first, fall back to older schemas
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, manifest, state, created_at, updated_at, session_id FROM agents",
+                "SELECT id, name, manifest, state, created_at, updated_at, session_id, email FROM agents",
             )
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id FROM agents")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents")
             })
@@ -257,6 +277,11 @@ impl StructuredStore {
                 } else {
                     None
                 };
+                let email: Option<String> = if col_count >= 8 {
+                    row.get(7).ok().flatten()
+                } else {
+                    None
+                };
                 Ok((
                     id_str,
                     name,
@@ -264,6 +289,7 @@ impl StructuredStore {
                     state_str,
                     created_str,
                     session_id_str,
+                    email,
                 ))
             })
             .map_err(|e| OpenFangError::Memory(e.to_string()))?;
@@ -273,7 +299,7 @@ impl StructuredStore {
         let mut repair_queue: Vec<(String, Vec<u8>, String)> = Vec::new();
 
         for row in rows {
-            let (id_str, name, manifest_blob, state_str, created_str, session_id_str) = match row {
+            let (id_str, name, manifest_blob, state_str, created_str, session_id_str, email) = match row {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!("Skipping agent row with read error: {e}");
@@ -352,6 +378,7 @@ impl StructuredStore {
                 identity: Default::default(),
                 onboarding_completed: false,
                 onboarding_completed_at: None,
+                email,
             });
         }
 

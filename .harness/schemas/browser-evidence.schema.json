@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openfang.dev/schemas/browser-evidence.schema.json",
+  "title": "BrowserEvidenceManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "head_sha",
+    "captured_at",
+    "flows",
+    "artifacts",
+    "assertions"
+  ],
+  "properties": {
+    "head_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "flows": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size_bytes"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "details"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail"]
+          },
+          "details": {"type": "string"}
+        }
+      }
+    }
+  }
+}

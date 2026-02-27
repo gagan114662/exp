@@ -201,7 +201,7 @@ Long-polling Telegram Bot API (`getUpdates` endpoint) running in background toki
 ```toml
 [telegram]
 enabled = true
-bot_token = "8250681078:AAEyrZ4yWgfAZE1oTiv1_RJJAcWDCgnozvs"
+bot_token = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 allowed_users = ["123456789", "987654321"]
 rate_limit_per_minute = 10
 ```

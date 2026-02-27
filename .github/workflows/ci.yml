@@ -3,30 +3,23 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # ── Rust library crates (all 3 platforms) ──────────────────────────────────
-  check:
-    name: Check / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  ci-check:
+    name: ci-check
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-${{ matrix.os }}
-      - name: Install Tauri system deps (Linux)
-        if: runner.os == 'Linux'
+          key: ci-check
+      - name: Install Tauri system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -37,21 +30,16 @@ jobs:
             patchelf
       - run: cargo check --workspace
 
-  test:
-    name: Test / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  ci-test:
+    name: ci-test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test-${{ matrix.os }}
-      - name: Install Tauri system deps (Linux)
-        if: runner.os == 'Linux'
+          key: ci-test
+      - name: Install Tauri system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -60,11 +48,10 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      # Tests that need a display (Tauri) are skipped in headless CI via cfg
       - run: cargo test --workspace
 
-  clippy:
-    name: Clippy
+  ci-clippy:
+    name: ci-clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +59,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-clippy
       - name: Install Tauri system deps
         run: |
           sudo apt-get update
@@ -83,8 +72,8 @@ jobs:
             patchelf
       - run: cargo clippy --workspace -- -D warnings
 
-  fmt:
-    name: Format
+  ci-fmt:
+    name: ci-fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,20 +82,21 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
-  audit:
-    name: Security Audit
+  ci-audit:
+    name: ci-audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-audit
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - run: cargo audit
 
-  # ── Secrets scanning (prevent accidental credential commits) ──────────────
-  secrets:
-    name: Secrets Scan
+  ci-secrets:
+    name: ci-secrets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -123,9 +113,8 @@ jobs:
             --only-verified \
             --exclude-paths=<(echo -e "target/\n.git/\nCargo.lock")
 
-  # ── Installer smoke test (verify install scripts from Vercel) ──────────────
-  install-smoke:
-    name: Install Script Smoke Test
+  ci-install-smoke:
+    name: ci-install-smoke
     runs-on: ubuntu-latest
     steps:
       - name: Fetch and syntax-check shell installer

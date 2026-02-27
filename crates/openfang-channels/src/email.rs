@@ -4,13 +4,20 @@
 //! Uses the subject line for agent routing (e.g., "\[coder\] Fix this bug").
 
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
+use async_std::net::TcpStream;
 use async_trait::async_trait;
-use futures::Stream;
+use chrono::Utc;
+use futures::{Stream, TryStreamExt};
+use lettre::message::header::ContentType;
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{Message, SmtpTransport, Transport};
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
 /// Email channel adapter using IMAP for receiving and SMTP for sending.
@@ -103,6 +110,107 @@ impl EmailAdapter {
         }
         subject.to_string()
     }
+
+    /// Parse raw RFC822 email into ChannelMessage.
+    fn parse_email_message(
+        body: &[u8],
+        allowed_senders: &[String],
+    ) -> Result<Option<ChannelMessage>, Box<dyn std::error::Error + Send + Sync>> {
+        use std::collections::HashMap;
+        use std::str;
+
+        let body_str = str::from_utf8(body)?;
+
+        // Simple header parsing (in production, use mail-parser crate)
+        let mut from = String::new();
+        let mut to = String::new();
+        let mut subject = String::new();
+        let mut message_id = None;
+        let mut in_reply_to = None;
+        let mut body_text = String::new();
+        let mut in_body = false;
+
+        for line in body_str.lines() {
+            if line.is_empty() && !in_body {
+                in_body = true;
+                continue;
+            }
+
+            if in_body {
+                body_text.push_str(line);
+                body_text.push('\n');
+            } else if let Some(addr) = line.strip_prefix("From: ") {
+                from = Self::extract_email_address(addr);
+            } else if let Some(addr) = line.strip_prefix("To: ") {
+                to = Self::extract_email_address(addr);
+            } else if let Some(subj) = line.strip_prefix("Subject: ") {
+                subject = subj.to_string();
+            } else if let Some(msg_id) = line.strip_prefix("Message-ID: ") {
+                message_id = Some(msg_id.trim().to_string());
+            } else if let Some(reply_to) = line.strip_prefix("In-Reply-To: ") {
+                in_reply_to = Some(reply_to.trim().to_string());
+            }
+        }
+
+        // Filter by allowed senders
+        if !allowed_senders.is_empty() && !allowed_senders.iter().any(|s| from.contains(s)) {
+            return Ok(None);
+        }
+
+        // Extract target agent name from subject (e.g., [agent-name] message)
+        let target_agent_name = Self::extract_agent_from_subject(&subject);
+        let clean_subject = Self::strip_agent_tag(&subject);
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "subject".to_string(),
+            serde_json::Value::String(clean_subject),
+        );
+        if !to.is_empty() {
+            metadata.insert(
+                "recipient_email".to_string(),
+                serde_json::Value::String(to.clone()),
+            );
+        }
+        if let Some(ref agent_name) = target_agent_name {
+            metadata.insert(
+                "target_agent_name".to_string(),
+                serde_json::Value::String(agent_name.clone()),
+            );
+        }
+        if let Some(ref reply_to) = in_reply_to {
+            metadata.insert(
+                "in_reply_to".to_string(),
+                serde_json::Value::String(reply_to.clone()),
+            );
+        }
+
+        Ok(Some(ChannelMessage {
+            channel: ChannelType::Email,
+            platform_message_id: message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            sender: ChannelUser {
+                platform_id: from.clone(),
+                display_name: from,
+                openfang_user: None,
+            },
+            content: ChannelContent::Text(body_text.trim().to_string()),
+            target_agent: None, // Agent name is in metadata["target_agent_name"], resolved by bridge
+            timestamp: Utc::now(),
+            is_group: false,
+            thread_id: in_reply_to,
+            metadata,
+        }))
+    }
+
+    /// Extract email address from "Name <email@example.com>" format.
+    fn extract_email_address(from_field: &str) -> String {
+        if let Some(start) = from_field.find('<') {
+            if let Some(end) = from_field.find('>') {
+                return from_field[start + 1..end].to_string();
+            }
+        }
+        from_field.trim().to_string()
+    }
 }
 
 #[async_trait]
@@ -119,14 +227,14 @@ impl ChannelAdapter for EmailAdapter {
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
     {
-        let (_tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let (tx, rx) = mpsc::unbounded_channel::<ChannelMessage>();
         let poll_interval = self.poll_interval;
-        let _allowed_senders = self.allowed_senders.clone();
+        let allowed_senders = self.allowed_senders.clone();
         let imap_host = self.imap_host.clone();
         let imap_port = self.imap_port;
-        let _username = self.username.clone();
-        let _password = self.password.clone();
-        let _folders = self.folders.clone();
+        let username = self.username.clone();
+        let password = self.password.clone();
+        let folders = self.folders.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         info!(
@@ -135,9 +243,8 @@ impl ChannelAdapter for EmailAdapter {
         );
 
         tokio::spawn(async move {
-            // Email polling is blocking I/O, so we'll use spawn_blocking
-            // For now, implement as a polling loop with placeholder
-            // Full IMAP implementation requires the `imap` crate
+            let mut seen_uids: HashSet<u32> = HashSet::new();
+
             loop {
                 tokio::select! {
                     _ = shutdown_rx.changed() => {
@@ -147,18 +254,102 @@ impl ChannelAdapter for EmailAdapter {
                     _ = tokio::time::sleep(poll_interval) => {}
                 }
 
-                // Placeholder: In a full implementation, this would:
-                // 1. Connect to IMAP server via TLS
-                // 2. Select each folder
-                // 3. Search for UNSEEN messages
-                // 4. Fetch and parse each message (From, Subject, Body)
-                // 5. Convert to ChannelMessage
-                // 6. Mark as seen
                 debug!("Email poll cycle (IMAP {}:{})", imap_host, imap_port);
+
+                // Connect to IMAP server
+                let tcp_stream = match TcpStream::connect((imap_host.as_str(), imap_port)).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        error!("Failed to connect to IMAP server: {}", e);
+                        continue;
+                    }
+                };
+
+                let tls = async_native_tls::TlsConnector::new();
+                let tls_stream = match tls.connect(&imap_host, tcp_stream).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        error!("Failed to establish TLS connection: {}", e);
+                        continue;
+                    }
+                };
+
+                let client = async_imap::Client::new(tls_stream);
+                let mut imap_session = match client.login(&username, password.as_str()).await {
+                    Ok(session) => session,
+                    Err((e, _)) => {
+                        error!("IMAP login failed: {}", e);
+                        continue;
+                    }
+                };
+
+                // Process each folder
+                for folder in &folders {
+                    if let Err(e) = imap_session.select(folder).await {
+                        warn!("Failed to select folder {}: {}", folder, e);
+                        continue;
+                    }
+
+                    // Search for all messages (we'll track seen ones ourselves)
+                    let uids: Vec<u32> = match imap_session.uid_search("ALL").await {
+                        Ok(uids) => uids.into_iter().collect(),
+                        Err(e) => {
+                            warn!("IMAP search failed in {}: {}", folder, e);
+                            continue;
+                        }
+                    };
+
+                    // Fetch new messages (not in seen_uids)
+                    for uid in uids.iter() {
+                        if seen_uids.contains(uid) {
+                            continue;
+                        }
+
+                        let messages: Vec<_> =
+                            match imap_session.uid_fetch(uid.to_string(), "RFC822").await {
+                                Ok(msgs) => msgs.try_collect().await.unwrap_or_default(),
+                                Err(e) => {
+                                    warn!("Failed to fetch message {}: {}", uid, e);
+                                    continue;
+                                }
+                            };
+
+                        for msg in messages.iter() {
+                            if let Some(body) = msg.body() {
+                                match Self::parse_email_message(body, &allowed_senders) {
+                                    Ok(Some(channel_msg)) => {
+                                        debug!(
+                                            "Parsed email from {}",
+                                            channel_msg.sender.platform_id
+                                        );
+                                        if tx.send(channel_msg).is_err() {
+                                            warn!("Channel closed, stopping email polling");
+                                            let _ = imap_session.logout().await;
+                                            return;
+                                        }
+                                        seen_uids.insert(*uid);
+                                    }
+                                    Ok(None) => {
+                                        debug!("Email filtered (sender not allowed)");
+                                        seen_uids.insert(*uid);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to parse email: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Logout
+                if let Err(e) = imap_session.logout().await {
+                    warn!("IMAP logout failed: {}", e);
+                }
             }
         });
 
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Box::pin(UnboundedReceiverStream::new(rx)))
     }
 
     async fn send(
@@ -166,14 +357,35 @@ impl ChannelAdapter for EmailAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match content {
-            ChannelContent::Text(text) => {
-                // Placeholder: In a full implementation, this would:
-                // 1. Build email (From, To, Subject, Body) using lettre
-                // 2. Connect to SMTP server via STARTTLS
-                // 3. Send the email
+        let text = match content {
+            ChannelContent::Text(t) => t,
+            _ => {
+                warn!("Unsupported email content type for {}", user.platform_id);
+                return Ok(());
+            }
+        };
+
+        // Build email message
+        let subject = format!("Re: {}", text.lines().next().unwrap_or("Response"));
+        let email = Message::builder()
+            .from(self.username.parse()?)
+            .to(user.platform_id.parse()?)
+            .subject(subject)
+            .header(ContentType::TEXT_PLAIN)
+            .body(text.clone())?;
+
+        // Send via SMTP
+        let creds = Credentials::new(self.username.clone(), self.password.to_string());
+
+        let mailer = SmtpTransport::starttls_relay(&self.smtp_host)?
+            .port(self.smtp_port)
+            .credentials(creds)
+            .build();
+
+        match mailer.send(&email) {
+            Ok(_) => {
                 info!(
-                    "Would send email to {}: {} chars",
+                    "✅ Sent email to {} ({} chars)",
                     user.platform_id,
                     text.len()
                 );
@@ -181,12 +393,13 @@ impl ChannelAdapter for EmailAdapter {
                     "SMTP: {}:{} -> {}",
                     self.smtp_host, self.smtp_port, user.platform_id
                 );
+                Ok(())
             }
-            _ => {
-                info!("Unsupported email content type for {}", user.platform_id);
+            Err(e) => {
+                error!("Failed to send email to {}: {}", user.platform_id, e);
+                Err(Box::new(e))
             }
         }
-        Ok(())
     }
 
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -273,5 +486,145 @@ mod tests {
             "Fix the bug"
         );
         assert_eq!(EmailAdapter::strip_agent_tag("No brackets"), "No brackets");
+    }
+
+    #[test]
+    fn test_extract_email_address() {
+        // Standard format: Name <email@domain.com>
+        assert_eq!(
+            EmailAdapter::extract_email_address("John Doe <john@example.com>"),
+            "john@example.com"
+        );
+        // Just email
+        assert_eq!(
+            EmailAdapter::extract_email_address("jane@example.com"),
+            "jane@example.com"
+        );
+        // With extra whitespace
+        assert_eq!(
+            EmailAdapter::extract_email_address("  test@test.com  "),
+            "test@test.com"
+        );
+    }
+
+    #[test]
+    fn test_parse_email_message() {
+        let raw_email = b"From: sender@example.com\r
+Subject: [test-agent] Hello\r
+Message-ID: <abc123@mail.example.com>\r
+\r
+This is the body of the email.
+It has multiple lines.
+";
+
+        let result = EmailAdapter::parse_email_message(raw_email, &[]).unwrap();
+        assert!(result.is_some());
+
+        let msg = result.unwrap();
+        assert_eq!(msg.sender.platform_id, "sender@example.com");
+        assert_eq!(msg.channel, ChannelType::Email);
+        assert!(matches!(msg.content, ChannelContent::Text(_)));
+
+        if let ChannelContent::Text(text) = msg.content {
+            assert!(text.contains("body of the email"));
+        }
+
+        // Check metadata
+        assert!(msg.metadata.contains_key("subject"));
+    }
+
+    #[test]
+    fn test_parse_email_with_agent_routing() {
+        let raw_email = b"From: user@example.com\r
+Subject: [my-agent] Please help\r
+\r
+I need assistance.
+";
+
+        let result = EmailAdapter::parse_email_message(raw_email, &[]).unwrap();
+        assert!(result.is_some());
+
+        let msg = result.unwrap();
+        // Agent routing is extracted and stored in metadata
+        assert!(msg.metadata.contains_key("target_agent_name"));
+        let agent_name = msg
+            .metadata
+            .get("target_agent_name")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(agent_name, "my-agent");
+
+        // target_agent field is None (will be resolved by bridge)
+        assert!(msg.target_agent.is_none());
+
+        // Subject should be cleaned
+        let subject = msg.metadata.get("subject").unwrap().as_str().unwrap();
+        assert_eq!(subject, "Please help");
+    }
+
+    #[test]
+    fn test_parse_email_filters_senders() {
+        let raw_email = b"From: blocked@spam.com\r
+Subject: Test\r
+\r
+Body
+";
+
+        // Should be filtered out
+        let result =
+            EmailAdapter::parse_email_message(raw_email, &["allowed@example.com".to_string()])
+                .unwrap();
+        assert!(result.is_none());
+
+        // Should pass through
+        let raw_allowed = b"From: allowed@example.com\r
+Subject: Test\r
+\r
+Body
+";
+        let result =
+            EmailAdapter::parse_email_message(raw_allowed, &["allowed@example.com".to_string()])
+                .unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_email_with_thread() {
+        let raw_email = b"From: user@example.com\r
+Subject: Re: Previous conversation\r
+Message-ID: <msg2@mail.com>\r
+In-Reply-To: <msg1@mail.com>\r
+\r
+Replying to your message.
+";
+
+        let result = EmailAdapter::parse_email_message(raw_email, &[]).unwrap();
+        assert!(result.is_some());
+
+        let msg = result.unwrap();
+        assert!(msg.thread_id.is_some());
+        assert_eq!(msg.thread_id.unwrap(), "<msg1@mail.com>");
+
+        // Check metadata has in_reply_to
+        assert!(msg.metadata.contains_key("in_reply_to"));
+    }
+
+    #[test]
+    fn test_adapter_defaults() {
+        let adapter = EmailAdapter::new(
+            "imap.test.com".to_string(),
+            993,
+            "smtp.test.com".to_string(),
+            587,
+            "bot@test.com".to_string(),
+            "password".to_string(),
+            60,
+            vec![], // Empty folders should default to INBOX
+            vec![],
+        );
+
+        assert_eq!(adapter.folders, vec!["INBOX".to_string()]);
+        assert_eq!(adapter.poll_interval, Duration::from_secs(60));
     }
 }

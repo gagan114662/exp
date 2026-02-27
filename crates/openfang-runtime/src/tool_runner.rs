@@ -4,9 +4,11 @@
 //! (agent_send, agent_spawn, etc.) require a KernelHandle to be passed in.
 
 use crate::kernel_handle::KernelHandle;
+use crate::llm_driver::LlmDriver;
 use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use openfang_skills::registry::SkillRegistry;
+use openfang_types::agent::ModelRoutingConfig;
 use openfang_types::taint::{TaintLabel, TaintSink, TaintedValue};
 use openfang_types::tool::{ToolDefinition, ToolResult};
 use std::collections::HashSet;
@@ -116,6 +118,9 @@ pub async fn execute_tool(
     tts_engine: Option<&crate::tts::TtsEngine>,
     docker_config: Option<&openfang_types::config::DockerSandboxConfig>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
+    llm_driver: Option<&Arc<dyn LlmDriver>>,
+    active_model_name: Option<&str>,
+    model_routing: Option<&ModelRoutingConfig>,
 ) -> ToolResult {
     // Capability enforcement: reject tools not in the allowed list
     if let Some(allowed) = allowed_tools {
@@ -299,6 +304,35 @@ pub async fn execute_tool(
         "process_write" => tool_process_write(input, process_manager).await,
         "process_kill" => tool_process_kill(input, process_manager).await,
         "process_list" => tool_process_list(process_manager, caller_agent_id).await,
+
+        // Bun-backed RLM tools
+        "rlm_dataset_load" => {
+            crate::rlm::runtime()
+                .tool_dataset_load(input, kernel, caller_agent_id, workspace_root)
+                .await
+        }
+        "rlm_js_eval" => {
+            crate::rlm::runtime()
+                .tool_js_eval(input, kernel, caller_agent_id)
+                .await
+        }
+        "rlm_fanout" => {
+            crate::rlm::runtime()
+                .tool_fanout(
+                    input,
+                    kernel,
+                    caller_agent_id,
+                    llm_driver,
+                    active_model_name,
+                    model_routing,
+                )
+                .await
+        }
+        "rlm_state_inspect" => {
+            crate::rlm::runtime()
+                .tool_state_inspect(input, kernel, caller_agent_id)
+                .await
+        }
 
         // Hand tools (curated autonomous capability packages)
         "hand_list" => tool_hand_list(kernel).await,
@@ -1073,6 +1107,65 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        // --- Bun-backed RLM tools ---
+        ToolDefinition {
+            name: "rlm_dataset_load".to_string(),
+            description: "Load a dataset into Bun-backed RLM state. Supports local files (csv/tsv/json/jsonl), sqlite queries, and postgres queries.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "description": "Dataset kind: file | sqlite | postgres" },
+                    "dataset_id": { "type": "string", "description": "Optional dataset identifier (auto-generated if omitted)" },
+                    "session_id": { "type": "string", "description": "Optional RLM session id (default: 'default')" },
+                    "path": { "type": "string", "description": "File path or sqlite DB path for file/sqlite kinds" },
+                    "format": { "type": "string", "description": "Optional file format override: csv | tsv | json | jsonl" },
+                    "query": { "type": "string", "description": "SQL query for sqlite/postgres kinds" },
+                    "connection": { "type": "string", "description": "Postgres connection key (matches rlm.postgres_connections[].dsn_env)" },
+                    "sanitize": { "type": "boolean", "description": "Override default PII sanitization for this load" }
+                },
+                "required": ["kind"]
+            }),
+        },
+        ToolDefinition {
+            name: "rlm_js_eval".to_string(),
+            description: "Evaluate JavaScript against persistent Bun RLM state. Code runs as async function body with `state` and optional `input` available.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional RLM session id (default: 'default')" },
+                    "code": { "type": "string", "description": "JavaScript function body to execute" },
+                    "input": { "description": "Optional JSON input bound as `input` in the JS eval context" }
+                },
+                "required": ["code"]
+            }),
+        },
+        ToolDefinition {
+            name: "rlm_fanout".to_string(),
+            description: "Run adaptive parallel RLM branch analysis with strict evidence validation and hard budget degradation.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional RLM session id (default: 'default')" },
+                    "question": { "type": "string", "description": "Analysis question for branch planning" },
+                    "dataset_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional dataset IDs to scope analysis (default: all loaded datasets)"
+                    }
+                },
+                "required": ["question"]
+            }),
+        },
+        ToolDefinition {
+            name: "rlm_state_inspect".to_string(),
+            description: "Inspect Bun-backed RLM state: loaded datasets, evidence ledger count, fanout cache, and Bun health.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Optional RLM session id (default: 'default')" }
+                }
             }),
         },
         // --- Canvas / A2UI tool ---
@@ -2911,8 +3004,8 @@ mod tests {
     fn test_builtin_tool_definitions() {
         let tools = builtin_tool_definitions();
         assert!(
-            tools.len() >= 39,
-            "Expected at least 39 tools, got {}",
+            tools.len() >= 43,
+            "Expected at least 43 tools, got {}",
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -2962,6 +3055,11 @@ mod tests {
         assert!(names.contains(&"text_to_speech"));
         assert!(names.contains(&"speech_to_text"));
         assert!(names.contains(&"docker_exec"));
+        // 4 RLM tools
+        assert!(names.contains(&"rlm_dataset_load"));
+        assert!(names.contains(&"rlm_js_eval"));
+        assert!(names.contains(&"rlm_fanout"));
+        assert!(names.contains(&"rlm_state_inspect"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
     }
@@ -3016,6 +3114,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3041,6 +3142,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3067,6 +3171,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3093,6 +3200,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3119,6 +3229,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         // web_search now attempts a real fetch; may succeed or fail depending on network
@@ -3145,6 +3258,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3171,6 +3287,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3198,6 +3317,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3225,6 +3347,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         // Should fail for file-not-found, NOT for permission denied
@@ -3392,6 +3517,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);
@@ -3437,6 +3565,9 @@ mod tests {
             None, // tts_engine
             None, // docker_config
             None, // process_manager
+            None, // llm_driver
+            None, // active_model_name
+            None, // model_routing
         )
         .await;
         assert!(result.is_error);

@@ -99,6 +99,10 @@ async fn start_test_server_with_provider(
             axum::routing::delete(routes::kill_agent),
         )
         .route(
+            "/api/agents/{id}/email",
+            axum::routing::get(routes::get_agent_email),
+        )
+        .route(
             "/api/triggers",
             axum::routing::get(routes::list_triggers).post(routes::create_trigger),
         )
@@ -727,6 +731,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
             axum::routing::delete(routes::kill_agent),
         )
         .route(
+            "/api/agents/{id}/email",
+            axum::routing::get(routes::get_agent_email),
+        )
+        .route(
             "/api/triggers",
             axum::routing::get(routes::list_triggers).post(routes::create_trigger),
         )
@@ -851,4 +859,109 @@ async fn test_auth_disabled_when_no_key() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Agent email endpoint tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_agent_email_endpoint_no_email_assigned() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap();
+
+    // GET email endpoint (should return 404 since no email assigned)
+    let resp = client
+        .get(format!("{}/api/agents/{}/email", server.base_url, agent_id))
+        .send()
+        .await
+        .unwrap();
+    
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("No email address"));
+}
+
+#[tokio::test]
+async fn test_agent_email_endpoint_with_email_assigned() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn agent
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // Manually assign email via kernel (simulating what would happen when email channel is configured)
+    let agent_id_typed: openfang_types::agent::AgentId = agent_id.parse().unwrap();
+    if let Some(mut entry) = server.state.kernel.registry.get(agent_id_typed) {
+        // Remove from registry, update email, save to DB, and re-register
+        server.state.kernel.registry.remove(agent_id_typed).expect("Failed to remove agent");
+        entry.email = Some("test-agent@openfang.local".to_string());
+        server.state.kernel.memory.save_agent(&entry).expect("Failed to save agent with email");
+        server.state.kernel.registry.register(entry).expect("Failed to re-register agent");
+    }
+
+    // GET email endpoint (should return 200 with email)
+    let resp = client
+        .get(format!("{}/api/agents/{}/email", server.base_url, agent_id))
+        .send()
+        .await
+        .unwrap();
+    
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["agent_id"], agent_id);
+    assert_eq!(body["email"], "test-agent@openfang.local");
+}
+
+#[tokio::test]
+async fn test_agent_email_endpoint_invalid_id() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // GET email with invalid ID → 400
+    let resp = client
+        .get(format!("{}/api/agents/not-a-uuid/email", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("Invalid agent ID"));
+}
+
+#[tokio::test]
+async fn test_agent_email_endpoint_nonexistent_agent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let fake_id = uuid::Uuid::new_v4();
+    
+    // GET email for nonexistent agent → 404
+    let resp = client
+        .get(format!("{}/api/agents/{}/email", server.base_url, fake_id))
+        .send()
+        .await
+        .unwrap();
+    
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("Agent not found"));
 }

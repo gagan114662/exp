@@ -15,8 +15,8 @@ echo ""
 echo "Step 1: Checking services..."
 
 # Check OpenFang daemon
-if curl -s http://127.0.0.1:4200/api/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✓${NC} OpenFang daemon is running on port 4200"
+if curl -s http://127.0.0.1:50051/api/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} OpenFang daemon is running on port 50051"
 else
     echo -e "${RED}✗${NC} OpenFang daemon is NOT running"
     echo "Start with: GROQ_API_KEY=<key> target/release/openfang.exe start"
@@ -24,8 +24,8 @@ else
 fi
 
 # Check Raindrop service
-if curl -s http://127.0.0.1:4201/health > /dev/null 2>&1; then
-    echo -e "${GREEN}✓${NC} Raindrop service is running on port 4201"
+if curl -s http://127.0.0.1:9000/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✓${NC} Raindrop service is running on port 9000"
 else
     echo -e "${RED}✗${NC} Raindrop service is NOT running"
     echo "Start with: cd crates/raindrop && cargo run"
@@ -60,7 +60,7 @@ echo ""
 # Step 3: Test OpenFang agent endpoint
 echo "Step 3: Testing OpenFang agent endpoint..."
 
-AGENTS_RESPONSE=$(curl -s http://127.0.0.1:4200/api/agents)
+AGENTS_RESPONSE=$(curl -s http://127.0.0.1:50051/api/agents)
 AGENT_COUNT=$(echo "$AGENTS_RESPONSE" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
 
 if [ "$AGENT_COUNT" -gt 0 ]; then
@@ -72,7 +72,7 @@ if [ "$AGENT_COUNT" -gt 0 ]; then
 
     # Test message endpoint (dry run - no actual LLM call)
     echo "  Testing message endpoint..."
-    MESSAGE_TEST=$(curl -s -X POST "http://127.0.0.1:4200/api/agents/${AGENT_ID}/message" \
+    MESSAGE_TEST=$(curl -s -X POST "http://127.0.0.1:50051/api/agents/${AGENT_ID}/message" \
         -H "Content-Type: application/json" \
         -d '{"message": "test"}' 2>&1)
 
@@ -92,7 +92,7 @@ echo ""
 echo "Step 4: Testing Raindrop SSE stream endpoint..."
 
 # Test basic health
-RAINDROP_HEALTH=$(curl -s http://127.0.0.1:4201/health)
+RAINDROP_HEALTH=$(curl -s http://127.0.0.1:9000/health)
 if echo "$RAINDROP_HEALTH" | grep -q "ok" 2>/dev/null; then
     echo -e "${GREEN}✓${NC} Raindrop health endpoint OK"
 else
@@ -102,7 +102,7 @@ fi
 
 # Test SSE endpoint (timeout after 2 seconds)
 echo "  Testing SSE stream endpoint..."
-SSE_TEST=$(timeout 2 curl -s -N http://127.0.0.1:4201/v1/incidents/stream 2>&1 || true)
+SSE_TEST=$(timeout 2 curl -s -N http://127.0.0.1:9000/v1/incidents/stream 2>&1 || true)
 
 if echo "$SSE_TEST" | grep -q "data:" 2>/dev/null || echo "$SSE_TEST" | grep -q "event:" 2>/dev/null; then
     echo -e "${GREEN}✓${NC} SSE stream endpoint is active"
@@ -125,17 +125,17 @@ echo "2. Monitor Raindrop logs for incoming webhook:"
 echo "   tail -f crates/raindrop/raindrop.log"
 echo ""
 echo "3. Check OpenFang dashboard for agent activity:"
-echo "   open http://127.0.0.1:4200"
+echo "   open http://127.0.0.1:50051"
 echo ""
 echo "4. Verify bot replies in Telegram chat"
 echo ""
 echo "5. Test error handling:"
-echo "   - Try: curl -X POST http://127.0.0.1:4201/api/telegram/webhook \\"
+echo "   - Try: curl -X POST http://127.0.0.1:9000/api/telegram/webhook \\"
 echo "     -H 'Content-Type: application/json' \\"
 echo "     -d '{\"message\":{\"chat\":{\"id\":123},\"text\":\"test\"}}'"
 echo ""
 echo "6. Monitor SSE stream for events:"
-echo "   curl -N http://127.0.0.1:4201/v1/incidents/stream"
+echo "   curl -N http://127.0.0.1:9000/v1/incidents/stream"
 echo ""
 echo -e "${GREEN}=== All automated checks passed! ===${NC}"
 echo ""

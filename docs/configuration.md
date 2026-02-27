@@ -1367,6 +1367,44 @@ Complete table of all environment variables referenced by the configuration. Non
 
 `KernelConfig::validate()` runs at boot time and returns a list of **warnings** (non-fatal). The kernel still starts, but logs each warning.
 
+## Runtime Language Model (RLM)
+
+The Bun-backed RLM pipeline is configured in `[rlm]` and is disabled by default.
+
+```toml
+[rlm]
+enabled = false
+bun_path = "bun"
+max_parallel_branches = 4
+max_fanout_tokens = 8000
+degrade_threshold = 0.85
+pii_sanitize_default = true
+max_rows_in_memory = 100000
+
+[[rlm.postgres_connections]]
+dsn_env = "OPENFANG_RLM_PG_MAIN_DSN"
+require_ssl = true
+statement_timeout_ms = 15000
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enables RLM runtime and tools. |
+| `bun_path` | string | `"bun"` | Bun executable path or command name on `PATH`. |
+| `max_parallel_branches` | integer | `4` | Max concurrent fanout branches. |
+| `max_fanout_tokens` | integer | `8000` | Hard planning budget for fanout branches. |
+| `degrade_threshold` | float | `0.85` | Budget fraction where low-priority branches are dropped. |
+| `pii_sanitize_default` | bool | `true` | Sanitizes email/phone/SSN-like data by default. |
+| `max_rows_in_memory` | integer | `100000` | Per-load row cap for in-memory frames. |
+| `postgres_connections` | array | `[]` | Named Postgres DSN env references for `rlm_dataset_load` kind=`postgres`. |
+
+`openfang doctor` and kernel boot both fail fast if `rlm.enabled=true` and Bun is missing at `rlm.bun_path`.
+
+Postgres behavior in RLM:
+- Uses native `tokio-postgres` query execution (not shelling out to `psql`).
+- Enforces read-only session characteristics and statement timeout.
+- `require_ssl=true` uses TLS connector and rejects DSNs that explicitly disable SSL.
+
 ### What is validated
 
 For every **enabled channel** (i.e., its config section is present in the TOML), the validator checks that the corresponding environment variable(s) are set and non-empty:

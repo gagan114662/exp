@@ -9,6 +9,7 @@ members = [
     "crates/openfang-kernel",
     "crates/openfang-cli",
     "crates/openfang-channels",
+    "crates/openfang-telegram",
     "crates/openfang-migrate",
     "crates/openfang-skills",
     "crates/openfang-desktop",
@@ -125,6 +126,11 @@ regex-lite = "0.1"
 # Testing
 tokio-test = "0.4"
 tempfile = "3"
+
+# Observability / Monitoring
+sentry = "0.34"
+sentry-tracing = "0.34"
+sentry-tower = "0.34"
 
 [profile.release]
 lto = true

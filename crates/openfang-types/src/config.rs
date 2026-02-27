@@ -1028,6 +1028,129 @@ impl Default for RaindropConfig {
     }
 }
 
+/// Postgres connection configuration for RLM dataset access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostgresConnectionConfig {
+    /// Environment variable that stores the Postgres DSN.
+    pub dsn_env: String,
+    /// Require SSL/TLS in the DSN for this connection.
+    pub require_ssl: bool,
+    /// Per-statement timeout in milliseconds.
+    pub statement_timeout_ms: u64,
+}
+
+impl Default for PostgresConnectionConfig {
+    fn default() -> Self {
+        Self {
+            dsn_env: "OPENFANG_RLM_POSTGRES_DSN".to_string(),
+            require_ssl: true,
+            statement_timeout_ms: 15_000,
+        }
+    }
+}
+
+/// Runtime Language Model (RLM) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RlmConfig {
+    /// Master switch for RLM features.
+    pub enabled: bool,
+    /// Bun executable path (or command name if on PATH).
+    pub bun_path: String,
+    /// Maximum concurrent fanout branches.
+    pub max_parallel_branches: usize,
+    /// Hard token budget for branch fanout planning.
+    pub max_fanout_tokens: usize,
+    /// Degrade threshold (0.0-1.0) for dropping lower-priority branches.
+    pub degrade_threshold: f32,
+    /// Sanitize PII in RLM datasets/results by default.
+    pub pii_sanitize_default: bool,
+    /// Maximum rows materialized in-memory per dataset load.
+    pub max_rows_in_memory: usize,
+    /// Named Postgres connections for RLM data loading.
+    pub postgres_connections: Vec<PostgresConnectionConfig>,
+}
+
+impl Default for RlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bun_path: "bun".to_string(),
+            max_parallel_branches: 4,
+            max_fanout_tokens: 8000,
+            degrade_threshold: 0.85,
+            pii_sanitize_default: true,
+            max_rows_in_memory: 100_000,
+            postgres_connections: Vec::new(),
+        }
+    }
+}
+
+/// Sentry AI Monitoring configuration.
+///
+/// Enables real-time visibility into LLM failures, performance bottlenecks,
+/// and cost anomalies in production.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SentryConfig {
+    /// Sentry DSN (from Sentry project settings).
+    /// If None, Sentry is disabled.
+    pub dsn: Option<String>,
+
+    /// Environment name (production, staging, development).
+    #[serde(default = "default_sentry_environment")]
+    pub environment: String,
+
+    /// Sample rate for traces (0.0 to 1.0).
+    /// 1.0 = 100% sampling, 0.1 = 10% sampling.
+    #[serde(default = "default_sentry_sample_rate")]
+    pub traces_sample_rate: f32,
+
+    /// Whether to include prompts/completions in events (PII warning).
+    /// Set to false in production to protect user privacy.
+    #[serde(default)]
+    pub include_prompts: bool,
+
+    /// Enable performance monitoring (transaction/span tracking).
+    #[serde(default = "default_true")]
+    pub performance_monitoring: bool,
+
+    /// Enable error tracking and event capture.
+    #[serde(default = "default_true")]
+    pub error_tracking: bool,
+
+    /// Custom tags to add to all Sentry events.
+    #[serde(default)]
+    pub tags: std::collections::HashMap<String, String>,
+}
+
+fn default_sentry_environment() -> String {
+    "development".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_sentry_sample_rate() -> f32 {
+    1.0 // 100% sampling in dev
+}
+
+impl Default for SentryConfig {
+    fn default() -> Self {
+        Self {
+            dsn: None,
+            environment: default_sentry_environment(),
+            traces_sample_rate: default_sentry_sample_rate(),
+            include_prompts: false,
+            performance_monitoring: true,
+            error_tracking: true,
+            tags: std::collections::HashMap::new(),
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1157,6 +1280,12 @@ pub struct KernelConfig {
     /// Raindrop incident routing configuration.
     #[serde(default)]
     pub raindrop: RaindropConfig,
+    /// Bun-backed Runtime Language Model (RLM) pipeline configuration.
+    #[serde(default)]
+    pub rlm: RlmConfig,
+    /// Sentry AI Monitoring configuration.
+    #[serde(default)]
+    pub sentry: SentryConfig,
 }
 
 /// Global spending budget configuration.
@@ -1304,6 +1433,8 @@ impl Default for KernelConfig {
             orchestrator: OrchestratorConfig::default(),
             video: VideoConfig::default(),
             raindrop: RaindropConfig::default(),
+            rlm: RlmConfig::default(),
+            sentry: SentryConfig::default(),
         }
     }
 }
@@ -1396,6 +1527,14 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("{} provider(s)", self.auth_profiles.len()),
             )
             .field("thinking", &self.thinking.is_some())
+            .field(
+                "rlm",
+                &format!(
+                    "enabled={} postgres_connections={}",
+                    self.rlm.enabled,
+                    self.rlm.postgres_connections.len()
+                ),
+            )
             .finish()
     }
 }
@@ -1819,6 +1958,10 @@ pub struct EmailConfig {
     pub allowed_senders: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Domain for agent email addresses (e.g., "myagents.com").
+    /// Used for auto-assigning emails in format: {agent-name}@{email_domain}
+    #[serde(default)]
+    pub email_domain: String,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1837,6 +1980,7 @@ impl Default for EmailConfig {
             folders: vec!["INBOX".to_string()],
             allowed_senders: vec![],
             default_agent: None,
+            email_domain: String::new(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3253,6 +3397,38 @@ impl KernelConfig {
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
+        // RLM validation
+        if self.rlm.enabled {
+            if self.rlm.bun_path.trim().is_empty() {
+                warnings.push("RLM enabled but rlm.bun_path is empty".to_string());
+            }
+            if self.rlm.max_parallel_branches == 0 {
+                warnings.push(
+                    "RLM enabled but rlm.max_parallel_branches=0 (no fanout branches possible)"
+                        .to_string(),
+                );
+            }
+            if self.rlm.max_rows_in_memory == 0 {
+                warnings.push(
+                    "RLM enabled but rlm.max_rows_in_memory=0 (dataset ingestion disabled)"
+                        .to_string(),
+                );
+            }
+            for pg in &self.rlm.postgres_connections {
+                if pg.dsn_env.trim().is_empty() {
+                    warnings.push(
+                        "RLM Postgres connection has empty dsn_env; set an env var name"
+                            .to_string(),
+                    );
+                } else if std::env::var(&pg.dsn_env).unwrap_or_default().is_empty() {
+                    warnings.push(format!(
+                        "RLM Postgres connection configured but {} is not set",
+                        pg.dsn_env
+                    ));
+                }
+            }
+        }
+
         // --- Production bounds validation ---
         // Clamp dangerous zero/extreme values to safe defaults instead of crashing.
         warnings
@@ -3290,6 +3466,32 @@ impl KernelConfig {
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
         }
+
+        // RLM fanout bounds
+        if self.rlm.max_parallel_branches == 0 {
+            self.rlm.max_parallel_branches = 1;
+        } else if self.rlm.max_parallel_branches > 32 {
+            self.rlm.max_parallel_branches = 32;
+        }
+
+        // RLM token budget bounds
+        if self.rlm.max_fanout_tokens == 0 {
+            self.rlm.max_fanout_tokens = 1024;
+        } else if self.rlm.max_fanout_tokens > 200_000 {
+            self.rlm.max_fanout_tokens = 200_000;
+        }
+
+        // RLM memory row cap bounds
+        if self.rlm.max_rows_in_memory == 0 {
+            self.rlm.max_rows_in_memory = 10_000;
+        } else if self.rlm.max_rows_in_memory > 1_000_000 {
+            self.rlm.max_rows_in_memory = 1_000_000;
+        }
+
+        // RLM degrade threshold bounds
+        if !(0.0..=1.0).contains(&self.rlm.degrade_threshold) {
+            self.rlm.degrade_threshold = 0.85;
+        }
     }
 }
 
@@ -3303,6 +3505,31 @@ mod tests {
         assert_eq!(config.log_level, "info");
         assert_eq!(config.api_listen, "127.0.0.1:50051");
         assert!(!config.network_enabled);
+        assert!(!config.rlm.enabled);
+        assert_eq!(config.rlm.bun_path, "bun");
+    }
+
+    #[test]
+    fn test_rlm_config_serde_defaults() {
+        let cfg: KernelConfig =
+            toml::from_str("[default_model]\nprovider='anthropic'\nmodel='x'\napi_key_env='A'\n")
+                .unwrap();
+        assert!(!cfg.rlm.enabled);
+        assert_eq!(cfg.rlm.max_parallel_branches, 4);
+    }
+
+    #[test]
+    fn test_rlm_clamp_bounds() {
+        let mut cfg = KernelConfig::default();
+        cfg.rlm.max_parallel_branches = 0;
+        cfg.rlm.max_fanout_tokens = 0;
+        cfg.rlm.max_rows_in_memory = 0;
+        cfg.rlm.degrade_threshold = 2.0;
+        cfg.clamp_bounds();
+        assert_eq!(cfg.rlm.max_parallel_branches, 1);
+        assert_eq!(cfg.rlm.max_fanout_tokens, 1024);
+        assert_eq!(cfg.rlm.max_rows_in_memory, 10_000);
+        assert_eq!(cfg.rlm.degrade_threshold, 0.85);
     }
 
     #[test]

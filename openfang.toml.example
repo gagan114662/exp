@@ -28,6 +28,22 @@ research = { provider = "gemini", model = "gemini-2.0-flash-exp" }   # Fast rese
 coding = { provider = "anthropic", model = "claude-opus-4-6" }       # Expert reasoning for code
 quick = { provider = "groq", model = "llama-3-70b" }                 # Ultra-fast Q&A
 
+# Bun-backed RLM auto-analysis (disabled by default)
+[rlm]
+enabled = false
+bun_path = "bun"
+max_parallel_branches = 4
+max_fanout_tokens = 8000
+degrade_threshold = 0.85
+pii_sanitize_default = true
+max_rows_in_memory = 100000
+
+# Named Postgres DSNs (env vars only; never inline secrets)
+[[rlm.postgres_connections]]
+dsn_env = "OPENFANG_RLM_PG_MAIN_DSN"
+require_ssl = true
+statement_timeout_ms = 15000
+
 # Video summary generation - post-execution demonstrations
 [video]
 enabled = true                           # Enable video summaries of agent work
@@ -42,6 +58,20 @@ max_storage_mb = 5000                    # Maximum storage (5 GB)
 
 # Usage tracking display
 # usage_footer = "Full"                   # "Off", "Tokens", "Cost", or "Full"
+
+# Sentry AI Monitoring - Real-time LLM observability (optional)
+[sentry]
+# dsn = "https://examplePublicKey@o0.ingest.sentry.io/0"  # Sentry DSN (get from sentry.io project settings)
+environment = "development"              # Environment tag (production, staging, development)
+traces_sample_rate = 1.0                 # Sample 100% of traces (reduce to 0.1 in prod for 10% sampling)
+include_prompts = false                  # Include prompts/completions in events (WARNING: may contain PII)
+performance_monitoring = true            # Track LLM call latency, tokens, cost
+error_tracking = true                    # Capture errors with full context
+
+# Optional: Custom tags added to all Sentry events
+[sentry.tags]
+# region = "us-west-2"
+# deployment = "kubernetes"
 
 # Channel adapters (configure tokens via environment variables)
 # Telegram bidirectional integration

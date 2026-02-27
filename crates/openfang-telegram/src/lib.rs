@@ -77,7 +77,9 @@ pub struct TelegramBot {
 impl TelegramBot {
     /// Create a new Telegram bot.
     pub fn new(config: TelegramConfig) -> Result<Self, String> {
-        let bot_token = config.bot_token.as_ref()
+        let bot_token = config
+            .bot_token
+            .as_ref()
             .ok_or_else(|| "Bot token not configured".to_string())?;
 
         let bot = Bot::new(bot_token);
@@ -92,7 +94,8 @@ impl TelegramBot {
 
     /// Send a text message to a chat.
     pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<(), String> {
-        let chat_id_i64: i64 = chat_id.parse()
+        let chat_id_i64: i64 = chat_id
+            .parse()
             .map_err(|_| format!("Invalid chat_id: {}", chat_id))?;
 
         self.bot
@@ -151,8 +154,9 @@ impl TelegramBot {
                                 /run <agent> <task> - Run a task on an agent\n\
                                 /agents - List all agents\n\
                                 /status <agent_id> - Get agent status\n\
-                                /help - Show this help"
-                            ).await?;
+                                /help - Show this help",
+                            )
+                            .await?;
                         }
                         TelegramCommand::Unknown { .. } => {
                             // Don't respond to unknown commands

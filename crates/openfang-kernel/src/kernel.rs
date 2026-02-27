@@ -123,12 +123,6 @@ pub struct OpenFangKernel {
     pub orchestrator: Arc<openfang_runtime::model_orchestrator::ModelOrchestrator>,
     /// Video summary renderer.
     pub video_renderer: Arc<openfang_runtime::video_renderer::VideoRenderer>,
-    /// Telegram bot for bidirectional communication.
-    pub telegram_bot: Option<Arc<openfang_telegram::TelegramBot>>,
-    /// Telegram command sender (for bot to forward commands).
-    telegram_command_tx: Option<tokio::sync::mpsc::Sender<(String, openfang_telegram::TelegramCommand)>>,
-    /// Telegram command receiver.
-    pub telegram_commands: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(String, openfang_telegram::TelegramCommand)>>>,
     /// Raindrop incident subscriber.
     pub raindrop_subscriber: Option<Arc<crate::raindrop_subscriber::RaindropSubscriber>>,
     /// OFP peer registry — tracks connected peers.
@@ -137,8 +131,13 @@ pub struct OpenFangKernel {
     pub peer_node: Option<Arc<openfang_wire::PeerNode>>,
     /// Boot timestamp for uptime calculation.
     pub booted_at: std::time::Instant,
+    /// Sentry client guard (keeps Sentry active for process lifetime).
+    #[allow(dead_code)]
+    sentry_guard: Option<sentry::ClientInitGuard>,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
     pub whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
+    /// Agent email address registry (agent_id -> email@domain).
+    pub agent_emails: dashmap::DashMap<AgentId, String>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<OpenFangKernel>>,
 }
@@ -486,85 +485,47 @@ fn gethostname() -> Option<String> {
     }
 }
 
-/// Handle a Telegram command by interacting with the kernel.
-async fn handle_telegram_command(
-    kernel: Arc<OpenFangKernel>,
-    chat_id: String,
-    command: openfang_telegram::TelegramCommand,
-) -> Result<(), String> {
-    use openfang_telegram::TelegramCommand;
+impl OpenFangKernel {
+    /// Initialize Sentry AI Monitoring if configured.
+    ///
+    /// Returns a ClientInitGuard that must be kept alive for the lifetime
+    /// of the kernel. If Sentry is not configured (dsn is None), returns None.
+    fn initialize_sentry(config: &KernelConfig) -> Option<sentry::ClientInitGuard> {
+        let dsn = config.sentry.dsn.as_ref()?;
 
-    let bot = kernel.telegram_bot.as_ref()
-        .ok_or_else(|| "Telegram bot not initialized".to_string())?;
-
-    match command {
-        TelegramCommand::ListAgents => {
-            let agents = kernel.registry.list();
-            let agent_list = agents
-                .iter()
-                .map(|a| format!("- {} ({})", a.name, a.id))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let response = if agent_list.is_empty() {
-                "No agents running.".to_string()
-            } else {
-                format!("Active agents:\n{}", agent_list)
-            };
-
-            bot.send_message(&chat_id, &response).await?;
+        // Skip if disabled
+        if !config.sentry.error_tracking && !config.sentry.performance_monitoring {
+            return None;
         }
-        TelegramCommand::Run { agent, task } => {
-            // Find agent by name
-            let agent_id = kernel.registry.find_by_name(&agent)
-                .map(|e| e.id)
-                .ok_or_else(|| format!("Agent '{}' not found", agent))?;
 
-            // Send message to agent
-            match kernel.send_message(agent_id, &task).await {
-                Ok(_) => {
-                    bot.send_message(&chat_id, &format!("✓ Task sent to {}", agent)).await?;
-                }
-                Err(e) => {
-                    bot.send_message(&chat_id, &format!("✗ Error: {}", e)).await?;
-                }
+        let guard = sentry::init((
+            dsn.clone(),
+            sentry::ClientOptions {
+                release: Some(env!("CARGO_PKG_VERSION").into()),
+                environment: Some(config.sentry.environment.clone().into()),
+                traces_sample_rate: config.sentry.traces_sample_rate,
+                send_default_pii: config.sentry.include_prompts,
+                attach_stacktrace: true,
+                ..Default::default()
+            },
+        ));
+
+        // Set custom tags from config
+        sentry::configure_scope(|scope| {
+            for (key, value) in &config.sentry.tags {
+                scope.set_tag(key, value);
             }
-        }
-        TelegramCommand::Status { agent_id } => {
-            let parsed_id = agent_id.parse()
-                .map_err(|_| format!("Invalid agent ID: {}", agent_id))?;
+        });
 
-            let entry = kernel.registry.get(parsed_id)
-                .ok_or_else(|| format!("Agent {} not found", agent_id))?;
+        info!(
+            environment = %config.sentry.environment,
+            sample_rate = %config.sentry.traces_sample_rate,
+            "Sentry AI Monitoring initialized"
+        );
 
-            // Format state in a user-friendly way
-            let state_display = match entry.state {
-                AgentState::Created => "Created (not started)",
-                AgentState::Running => "Running",
-                AgentState::Suspended => "Suspended (paused)",
-                AgentState::Terminated => "Terminated",
-                AgentState::Crashed => "Crashed (awaiting recovery)",
-            };
-
-            let response = format!(
-                "Agent: {}\nID: {}\nState: {}\nModel: {}",
-                entry.name, entry.id, state_display, entry.manifest.model.model
-            );
-
-            bot.send_message(&chat_id, &response).await?;
-        }
-        TelegramCommand::Help => {
-            // Already handled in polling loop
-        }
-        TelegramCommand::Unknown { .. } => {
-            // Ignore unknown commands
-        }
+        Some(guard)
     }
 
-    Ok(())
-}
-
-impl OpenFangKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
         let config = load_config(config_path);
@@ -594,6 +555,25 @@ impl OpenFangKernel {
         let warnings = config.validate();
         for w in &warnings {
             warn!("Config: {}", w);
+        }
+
+        // Initialize Sentry AI Monitoring (must happen early to capture all events)
+        let sentry_guard = Self::initialize_sentry(&config);
+
+        // Configure Bun-backed RLM runtime and fail fast if Bun is required but missing.
+        openfang_runtime::rlm::configure(config.rlm.clone());
+        if config.rlm.enabled {
+            let bun_ok = std::process::Command::new(&config.rlm.bun_path)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !bun_ok {
+                return Err(KernelError::BootFailed(format!(
+                    "RLM is enabled but Bun was not found/executable at '{}'",
+                    config.rlm.bun_path
+                )));
+            }
         }
 
         // Ensure data directory exists
@@ -913,9 +893,11 @@ impl OpenFangKernel {
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
         // Initialize model orchestrator
-        let orchestrator = Arc::new(openfang_runtime::model_orchestrator::ModelOrchestrator::new(
-            config.orchestrator.clone(),
-        ));
+        let orchestrator = Arc::new(
+            openfang_runtime::model_orchestrator::ModelOrchestrator::new(
+                config.orchestrator.clone(),
+            ),
+        );
 
         if config.orchestrator.enabled {
             info!("Model orchestrator enabled");
@@ -931,49 +913,18 @@ impl OpenFangKernel {
             info!("Video summary generation enabled");
         }
 
-        // Initialize Telegram bot
-        let telegram_bot = if let Some(ref telegram_cfg) = config.channels.telegram {
-            let bot_token = std::env::var(&telegram_cfg.bot_token_env).ok();
-
-            if bot_token.is_some() {
-                let telegram_config = openfang_telegram::TelegramConfig {
-                    enabled: true,
-                    bot_token,
-                    allowed_users: telegram_cfg.allowed_users.iter().map(|id| id.to_string()).collect(),
-                    rate_limit_per_minute: 10,
-                };
-
-                match openfang_telegram::TelegramBot::new(telegram_config) {
-                    Ok(bot) => {
-                        info!("Telegram bot initialized");
-                        Some(Arc::new(bot))
-                    }
-                    Err(e) => {
-                        warn!("Failed to initialize Telegram bot: {}", e);
-                        None
-                    }
-                }
-            } else {
-                warn!("Telegram configured but {} not set", telegram_cfg.bot_token_env);
-                None
-            }
-        } else {
-            None
-        };
-
-        let (command_tx, command_rx) = tokio::sync::mpsc::channel(100);
-        let telegram_command_tx = if telegram_bot.is_some() {
-            Some(command_tx)
-        } else {
-            None
-        };
-        let telegram_commands = tokio::sync::Mutex::new(Some(command_rx));
+        // Get Telegram bot token for Raindrop integration
+        let telegram_bot_token = config
+            .channels
+            .telegram
+            .as_ref()
+            .and_then(|cfg| std::env::var(&cfg.bot_token_env).ok());
 
         // Initialize Raindrop subscriber
-        let raindrop_subscriber = if config.raindrop.enabled && telegram_bot.is_some() {
+        let raindrop_subscriber = if config.raindrop.enabled && telegram_bot_token.is_some() {
             let subscriber = Arc::new(crate::raindrop_subscriber::RaindropSubscriber::new(
                 config.raindrop.clone(),
-                telegram_bot.clone().unwrap(),
+                telegram_bot_token.clone(),
             ));
 
             info!(
@@ -1029,14 +980,13 @@ impl OpenFangKernel {
             process_manager: Arc::new(openfang_runtime::process_manager::ProcessManager::new(5)),
             orchestrator,
             video_renderer,
-            telegram_bot,
-            telegram_command_tx,
-            telegram_commands,
             raindrop_subscriber,
             peer_registry: None,
             peer_node: None,
             booted_at: std::time::Instant::now(),
+            sentry_guard,
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
+            agent_emails: dashmap::DashMap::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -1066,6 +1016,13 @@ impl OpenFangKernel {
                         restored_entry.manifest.exec_policy =
                             Some(kernel.config.exec_policy.clone());
                     }
+
+                    // Restore email assignment to in-memory map
+                    if let Some(ref email) = restored_entry.email {
+                        kernel.agent_emails.insert(agent_id, email.clone());
+                        tracing::debug!(agent = %name, email = %email, "Restored email assignment");
+                    }
+
                     if let Err(e) = kernel.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
@@ -1162,6 +1119,26 @@ impl OpenFangKernel {
         self.scheduler
             .register(agent_id, manifest.resources.clone());
 
+        // Auto-assign email address if email channel is configured (before creating entry)
+        let assigned_email = if let Some(ref email_config) = self.config.channels.email {
+            if !email_config.email_domain.is_empty() {
+                // Generate email address from agent name
+                let sanitized_name = name
+                    .to_lowercase()
+                    .replace(' ', "-")
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-')
+                    .collect::<String>();
+
+                let email_address = format!("{}@{}", sanitized_name, email_config.email_domain);
+                Some(email_address)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Create registry entry
         let tags = manifest.tags.clone();
         let entry = AgentEntry {
@@ -1179,6 +1156,7 @@ impl OpenFangKernel {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: assigned_email.clone(),
         };
         self.registry
             .register(entry.clone())
@@ -1189,7 +1167,7 @@ impl OpenFangKernel {
             self.registry.add_child(parent_id, agent_id);
         }
 
-        // Persist agent to SQLite so it survives restarts
+        // Persist agent to SQLite so it survives restarts (with email field)
         self.memory
             .save_agent(&entry)
             .map_err(KernelError::OpenFang)?;
@@ -1228,6 +1206,24 @@ impl OpenFangKernel {
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
         let _triggered = self.triggers.evaluate(&event);
+
+        // Log email assignment if configured (email already assigned and persisted above)
+        if let Some(ref email) = assigned_email {
+            // Store in agent email registry for fast lookup
+            self.agent_emails.insert(agent_id, email.clone());
+
+            info!(
+                agent = %name,
+                id = %agent_id,
+                email = %email,
+                "Auto-assigned email address to agent"
+            );
+
+            // TODO: Create mailbox on email server (e.g., via Stalwart API)
+            // For now, we just store the mapping. The email adapter will
+            // route incoming emails based on the To: address by looking up
+            // the agent via this registry.
+        }
 
         Ok(agent_id)
     }
@@ -2134,6 +2130,32 @@ impl OpenFangKernel {
             result.total_usage.input_tokens,
             result.total_usage.output_tokens,
         );
+
+        // Record cost to Sentry for observability
+        sentry::configure_scope(|scope| {
+            if let Some(span) = scope.get_span() {
+                span.set_data("cost_usd", cost.into());
+                span.set_data(
+                    "cost_tier",
+                    if cost > 1.0 {
+                        "high".into()
+                    } else if cost > 0.1 {
+                        "medium".into()
+                    } else {
+                        "low".into()
+                    },
+                );
+            }
+        });
+
+        // Alert on high-cost agent loops (> $10)
+        if cost > 10.0 {
+            sentry::capture_message(
+                &format!("High cost agent loop: ${:.2} for agent {}", cost, agent_id),
+                sentry::Level::Warning,
+            );
+        }
+
         let _ = self.metering.record(&openfang_memory::usage::UsageRecord {
             agent_id,
             model: model.clone(),
@@ -2373,15 +2395,11 @@ impl OpenFangKernel {
     /// Switch an agent's model.
     pub fn set_agent_model(&self, agent_id: AgentId, model: &str) -> KernelResult<()> {
         // Resolve provider from model catalog so switching models also switches provider
-        let resolved_provider = self
-            .model_catalog
-            .read()
-            .ok()
-            .and_then(|catalog| {
-                catalog
-                    .find_model(model)
-                    .map(|entry| entry.provider.clone())
-            });
+        let resolved_provider = self.model_catalog.read().ok().and_then(|catalog| {
+            catalog
+                .find_model(model)
+                .map(|entry| entry.provider.clone())
+        });
 
         if let Some(provider) = resolved_provider {
             self.registry
@@ -2508,6 +2526,13 @@ impl OpenFangKernel {
             input_tokens,
             output_tokens,
         );
+
+        // Record cost to Sentry if in active transaction
+        sentry::configure_scope(|scope| {
+            if let Some(span) = scope.get_span() {
+                span.set_data("estimated_cost_usd", cost.into());
+            }
+        });
 
         Ok((input_tokens, output_tokens, cost))
     }
@@ -3092,45 +3117,6 @@ impl OpenFangKernel {
 
         // Start heartbeat monitor for agent health checking
         self.start_heartbeat_monitor();
-
-        // Start Telegram bot polling in background
-        if let Some(ref bot) = self.telegram_bot {
-            if let Some(ref tx) = self.telegram_command_tx {
-                let bot_clone = (**bot).clone();
-                let tx_clone = tx.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = bot_clone.start_polling(tx_clone).await {
-                        tracing::error!("Telegram bot polling failed: {}", e);
-                    }
-                });
-            }
-        }
-
-        // Start Telegram command processor
-        let kernel_arc = Arc::clone(self);
-        let kernel_weak = Arc::downgrade(&kernel_arc);
-        if self.telegram_bot.is_some() {
-            tokio::spawn(async move {
-                let mut rx_guard = kernel_arc.telegram_commands.lock().await;
-                if let Some(mut rx) = rx_guard.take() {
-                    drop(rx_guard);
-
-                    while let Some((chat_id, command)) = rx.recv().await {
-                        if let Some(k) = kernel_weak.upgrade() {
-                            if let Err(e) = handle_telegram_command(k, chat_id.clone(), command.clone()).await {
-                                tracing::error!(
-                                    chat_id = %chat_id,
-                                    command = ?command,
-                                    error = %e,
-                                    "Failed to handle Telegram command"
-                                );
-                            }
-                        }
-                    }
-                }
-            });
-        }
 
         // Start Raindrop incident subscriber
         if let Some(ref subscriber) = self.raindrop_subscriber {
@@ -5002,6 +4988,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: None,
         };
         registry.register(entry).unwrap();
 
@@ -5039,6 +5026,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: None,
         };
         registry.register(e1).unwrap();
 
@@ -5062,6 +5050,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            email: None,
         };
         registry.register(e2).unwrap();
 

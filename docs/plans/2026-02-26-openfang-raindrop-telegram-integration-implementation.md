@@ -6,7 +6,7 @@
 
 **Architecture:** OpenFang hosts the teloxide bot (long polling), executes commands locally, subscribes to Raindrop's SSE incident stream, and forwards to Telegram with policy filtering.
 
-**Tech Stack:** Rust, teloxide 0.12, reqwest SSE, tokio async runtime, bot token: 8250681078:AAE...
+**Tech Stack:** Rust, teloxide 0.12, reqwest SSE, tokio async runtime, bot token: YOUR_TELEGRAM_BOT_TOKEN_HERE
 
 ---
 
@@ -912,7 +912,7 @@ In both projects' `.env.example`, add:
 
 ```bash
 # Shared Telegram bot token (from @BotFather)
-TELEGRAM_BOT_TOKEN=8250681078:AAEyrZ4yWgfAZE1oTiv1_RJJAcWDCgnozvs
+TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN_HERE
 ```
 
 **Step 3: Commit OpenFang changes**
@@ -1014,7 +1014,7 @@ After completing all tasks:
 **Terminal 1 (OpenFang):**
 ```bash
 cd "/Users/gaganarora/Desktop/my projects/open_fang"
-export TELEGRAM_BOT_TOKEN=8250681078:AAEyrZ4yWgfAZE1oTiv1_RJJAcWDCgnozvs
+export TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN_HERE
 cargo build --release
 ./target/release/openfang start
 ```
@@ -1022,7 +1022,7 @@ cargo build --release
 **Terminal 2 (Raindrop):**
 ```bash
 cd "/Users/gaganarora/Desktop/my projects/raindrop_rebuild"
-export TELEGRAM_BOT_TOKEN=8250681078:AAEyrZ4yWgfAZE1oTiv1_RJJAcWDCgnozvs
+export TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN_HERE
 cargo run --bin rd-api
 ```
 

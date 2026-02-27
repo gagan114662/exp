@@ -293,16 +293,55 @@ impl CronScheduler {
 ///
 /// - `At { at }` — returns `at` directly.
 /// - `Every { every_secs }` — returns `now + every_secs`.
-/// - `Cron { .. }` — returns 60 seconds from now (placeholder until a cron
-///   expression parser is added).
+/// - `Cron { expr, tz }` — parses the cron expression and returns the next scheduled time.
 pub fn compute_next_run(schedule: &CronSchedule) -> chrono::DateTime<Utc> {
     match schedule {
         CronSchedule::At { at } => *at,
         CronSchedule::Every { every_secs } => Utc::now() + Duration::seconds(*every_secs as i64),
-        CronSchedule::Cron { .. } => {
-            // Placeholder: real cron parsing will be added when the `cron`
-            // crate is brought in. For now, fire 60 seconds from now.
-            Utc::now() + Duration::seconds(60)
+        CronSchedule::Cron { expr, tz } => {
+            use cron::Schedule;
+            use std::str::FromStr;
+
+            // Convert 5-field cron expressions to 6-field (the cron crate requires seconds)
+            let fields: Vec<&str> = expr.split_whitespace().collect();
+            let expr_to_parse = if fields.len() == 5 {
+                format!("0 {}", expr.trim())
+            } else {
+                expr.trim().to_string()
+            };
+
+            // Parse the cron expression
+            let schedule = match Schedule::from_str(&expr_to_parse) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Invalid cron expression '{}': {}", expr, e);
+                    // Fallback to 60 seconds if parsing fails (shouldn't happen if validated)
+                    return Utc::now() + Duration::seconds(60);
+                }
+            };
+
+            // Determine the timezone to use
+            let timezone_str = tz.as_deref().unwrap_or("UTC");
+            let timezone: chrono_tz::Tz = match timezone_str.parse() {
+                Ok(tz) => tz,
+                Err(_) => {
+                    tracing::error!("Invalid timezone '{}', using UTC", timezone_str);
+                    chrono_tz::UTC
+                }
+            };
+
+            // Get current time in the specified timezone
+            let now = Utc::now().with_timezone(&timezone);
+
+            // Find the next occurrence
+            match schedule.after(&now).next() {
+                Some(next) => next.with_timezone(&Utc),
+                None => {
+                    tracing::error!("Cron expression '{}' has no future occurrences", expr);
+                    // Fallback to 60 seconds
+                    Utc::now() + Duration::seconds(60)
+                }
+            }
         }
     }
 }
@@ -655,18 +694,75 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_next_run_cron_placeholder() {
-        let before = Utc::now();
+    fn test_compute_next_run_cron_real_parsing() {
+        use chrono::Timelike;
+        let now = Utc::now();
         let schedule = CronSchedule::Cron {
             expr: "0 9 * * *".into(),
             tz: None,
         };
         let next = compute_next_run(&schedule);
-        let after = Utc::now();
 
-        // Placeholder returns ~60s from now
-        assert!(next >= before + Duration::seconds(59));
-        assert!(next <= after + Duration::seconds(61));
+        // Should return the next 9 AM occurrence
+        // This could be today (if it's before 9 AM) or tomorrow (if it's after 9 AM)
+        assert!(next > now, "Next run should be in the future");
+        assert!(
+            next <= now + Duration::hours(24),
+            "Next run should be within 24 hours"
+        );
+
+        // Verify it's at 9 AM UTC
+        assert_eq!(next.hour(), 9);
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
+    }
+
+    #[test]
+    fn test_compute_next_run_cron_with_timezone() {
+        use chrono::Timelike;
+        let now = Utc::now();
+        let schedule = CronSchedule::Cron {
+            expr: "0 */2 * * *".into(), // Every 2 hours (simpler than weekdays)
+            tz: Some("America/New_York".into()),
+        };
+        let next = compute_next_run(&schedule);
+
+        // Should return a future time
+        assert!(next > now, "Next run should be in the future");
+
+        // Should be within 2 hours
+        assert!(
+            next <= now + Duration::hours(2),
+            "Next run should be within 2 hours"
+        );
+
+        // Should be at the top of the hour in New York time
+        use chrono_tz::America::New_York;
+        let next_ny = next.with_timezone(&New_York);
+        assert_eq!(next_ny.minute(), 0, "Should be at minute 0");
+        assert_eq!(next_ny.second(), 0, "Should be at second 0");
+    }
+
+    #[test]
+    fn test_compute_next_run_cron_every_2_hours() {
+        use chrono::Timelike;
+        let now = Utc::now();
+        let schedule = CronSchedule::Cron {
+            expr: "0 */2 * * *".into(), // Every 2 hours
+            tz: None,
+        };
+        let next = compute_next_run(&schedule);
+
+        // Should return a future time within 2 hours
+        assert!(next > now, "Next run should be in the future");
+        assert!(
+            next <= now + Duration::hours(2),
+            "Next run should be within 2 hours"
+        );
+
+        // Should be at the top of the hour
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
     }
 
     // -- error message truncation in record_failure -------------------------

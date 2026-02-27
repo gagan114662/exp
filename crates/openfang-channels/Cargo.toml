@@ -26,6 +26,10 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+async-imap = "0.11"
+async-native-tls = "0.5"
+async-std = "1.13"
+lettre = "0.11"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

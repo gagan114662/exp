@@ -2237,6 +2237,33 @@ decay_rate = 0.05
                     }
                     checks.push(serde_json::json!({"check": "exec_policy", "status": "ok", "mode": mode, "safe_bins": safe_bins_count}));
 
+                    // Check RLM Bun dependency if enabled.
+                    if cfg.rlm.enabled {
+                        let bun_ok = std::process::Command::new(&cfg.rlm.bun_path)
+                            .arg("--version")
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+                        if bun_ok {
+                            if !json {
+                                ui::check_ok(&format!(
+                                    "RLM enabled: Bun available at '{}'",
+                                    cfg.rlm.bun_path
+                                ));
+                            }
+                            checks.push(serde_json::json!({"check": "rlm_bun", "status": "ok", "path": cfg.rlm.bun_path}));
+                        } else {
+                            if !json {
+                                ui::check_fail(&format!(
+                                    "RLM enabled but Bun not found/executable at '{}'",
+                                    cfg.rlm.bun_path
+                                ));
+                            }
+                            checks.push(serde_json::json!({"check": "rlm_bun", "status": "fail", "path": cfg.rlm.bun_path}));
+                            all_ok = false;
+                        }
+                    }
+
                     // Check includes
                     if !cfg.include.is_empty() {
                         let mut include_ok = true;

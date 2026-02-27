@@ -135,6 +135,11 @@ impl ChannelBridgeHandle for MockHandle {
         Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
     }
 
+    async fn find_agent_by_email(&self, _email: &str) -> Result<Option<AgentId>, String> {
+        // Mock implementation - always returns None
+        Ok(None)
+    }
+
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
         Ok(self.agents.lock().unwrap().clone())
     }

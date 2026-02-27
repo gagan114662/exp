@@ -153,6 +153,10 @@ pub async fn build_router(
             axum::routing::post(routes::switch_agent_session),
         )
         .route(
+            "/api/agents/{id}/email",
+            axum::routing::get(routes::get_agent_email),
+        )
+        .route(
             "/api/agents/{id}/session/reset",
             axum::routing::post(routes::reset_session),
         )
