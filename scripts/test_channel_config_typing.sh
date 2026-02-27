@@ -43,7 +43,7 @@ done
 # Test 1: WhatsApp webhook_port (should write as integer)
 echo ""
 echo "Test 1: WhatsApp webhook_port (integer)"
-curl -s -X PUT "http://127.0.0.1:4200/api/channels/whatsapp/configure" \
+curl -s -X POST "http://127.0.0.1:4200/api/channels/whatsapp/configure" \
   -H "Content-Type: application/json" \
   -d '{"webhook_port": "8443", "verify_token": "test123", "access_token": "abc"}'
 
@@ -66,7 +66,7 @@ fi
 # Test 2: Reddit subreddits (should write as array)
 echo ""
 echo "Test 2: Reddit subreddits (array)"
-curl -s -X PUT "http://127.0.0.1:4200/api/channels/reddit/configure" \
+curl -s -X POST "http://127.0.0.1:4200/api/channels/reddit/configure" \
   -H "Content-Type: application/json" \
   -d '{"client_id": "test_client", "client_secret": "test_secret", "subreddits": "rust,programming,opensource"}'
 
@@ -89,7 +89,7 @@ fi
 # Test 3: Teams allowed_tenants (should write as array)
 echo ""
 echo "Test 3: Teams allowed_tenants (array)"
-curl -s -X PUT "http://127.0.0.1:4200/api/channels/teams/configure" \
+curl -s -X POST "http://127.0.0.1:4200/api/channels/teams/configure" \
   -H "Content-Type: application/json" \
   -d '{"app_id": "test_app", "app_password": "test_pass", "allowed_tenants": "tenant1,tenant2"}'
 
@@ -111,7 +111,7 @@ fi
 # Test 4: Line webhook_port (should write as integer)
 echo ""
 echo "Test 4: Line webhook_port (integer)"
-curl -s -X PUT "http://127.0.0.1:4200/api/channels/line/configure" \
+curl -s -X POST "http://127.0.0.1:4200/api/channels/line/configure" \
   -H "Content-Type: application/json" \
   -d '{"channel_secret": "test_secret", "channel_access_token": "test_token", "webhook_port": "9443"}'
 

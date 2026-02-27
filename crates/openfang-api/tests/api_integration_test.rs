@@ -886,7 +886,7 @@ async fn test_agent_email_endpoint_no_email_assigned() {
         .send()
         .await
         .unwrap();
-    
+
     assert_eq!(resp.status(), 404);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("No email address"));
@@ -911,10 +911,25 @@ async fn test_agent_email_endpoint_with_email_assigned() {
     let agent_id_typed: openfang_types::agent::AgentId = agent_id.parse().unwrap();
     if let Some(mut entry) = server.state.kernel.registry.get(agent_id_typed) {
         // Remove from registry, update email, save to DB, and re-register
-        server.state.kernel.registry.remove(agent_id_typed).expect("Failed to remove agent");
+        server
+            .state
+            .kernel
+            .registry
+            .remove(agent_id_typed)
+            .expect("Failed to remove agent");
         entry.email = Some("test-agent@openfang.local".to_string());
-        server.state.kernel.memory.save_agent(&entry).expect("Failed to save agent with email");
-        server.state.kernel.registry.register(entry).expect("Failed to re-register agent");
+        server
+            .state
+            .kernel
+            .memory
+            .save_agent(&entry)
+            .expect("Failed to save agent with email");
+        server
+            .state
+            .kernel
+            .registry
+            .register(entry)
+            .expect("Failed to re-register agent");
     }
 
     // GET email endpoint (should return 200 with email)
@@ -923,7 +938,7 @@ async fn test_agent_email_endpoint_with_email_assigned() {
         .send()
         .await
         .unwrap();
-    
+
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["agent_id"], agent_id);
@@ -941,7 +956,7 @@ async fn test_agent_email_endpoint_invalid_id() {
         .send()
         .await
         .unwrap();
-    
+
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("Invalid agent ID"));
@@ -953,14 +968,14 @@ async fn test_agent_email_endpoint_nonexistent_agent() {
     let client = reqwest::Client::new();
 
     let fake_id = uuid::Uuid::new_v4();
-    
+
     // GET email for nonexistent agent → 404
     let resp = client
         .get(format!("{}/api/agents/{}/email", server.base_url, fake_id))
         .send()
         .await
         .unwrap();
-    
+
     assert_eq!(resp.status(), 404);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("Agent not found"));

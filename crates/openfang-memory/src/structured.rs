@@ -127,10 +127,7 @@ impl StructuredStore {
         );
 
         // Add email column if it doesn't exist yet (migration compat)
-        let _ = conn.execute(
-            "ALTER TABLE agents ADD COLUMN email TEXT DEFAULT NULL",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN email TEXT DEFAULT NULL", []);
 
         conn.execute(
             "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, email)
@@ -186,7 +183,14 @@ impl StructuredStore {
             } else {
                 None
             };
-            Ok((name, manifest_blob, state_str, created_str, session_id_str, email))
+            Ok((
+                name,
+                manifest_blob,
+                state_str,
+                created_str,
+                session_id_str,
+                email,
+            ))
         });
 
         match result {
@@ -299,13 +303,14 @@ impl StructuredStore {
         let mut repair_queue: Vec<(String, Vec<u8>, String)> = Vec::new();
 
         for row in rows {
-            let (id_str, name, manifest_blob, state_str, created_str, session_id_str, email) = match row {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("Skipping agent row with read error: {e}");
-                    continue;
-                }
-            };
+            let (id_str, name, manifest_blob, state_str, created_str, session_id_str, email) =
+                match row {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("Skipping agent row with read error: {e}");
+                        continue;
+                    }
+                };
 
             // Deduplicate: skip agents with names we've already seen
             let name_lower = name.to_lowercase();

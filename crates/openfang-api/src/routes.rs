@@ -6170,11 +6170,16 @@ fn get_config_field_type(channel: &str, field: &str) -> ConfigFieldType {
         // IRC arrays
         ("irc", "channels") => ConfigFieldType::StringArray,
 
-        // RocketChat arrays
-        ("rocket_chat", "allowed_channels") => ConfigFieldType::StringArray,
+        // IRC ports
+        ("irc", "port") => ConfigFieldType::Integer,
 
-        // XMPP arrays
+        // RocketChat (note: channel name is "rocketchat" not "rocket_chat")
+        ("rocket_chat", "allowed_channels") => ConfigFieldType::StringArray,
+        ("rocketchat", "allowed_channels") => ConfigFieldType::StringArray,
+
+        // XMPP
         ("xmpp", "rooms") => ConfigFieldType::StringArray,
+        ("xmpp", "port") => ConfigFieldType::Integer,
 
         // Keybase arrays
         ("keybase", "allowed_teams") => ConfigFieldType::StringArray,
@@ -6187,6 +6192,21 @@ fn get_config_field_type(channel: &str, field: &str) -> ConfigFieldType {
 
         // Nextcloud arrays
         ("nextcloud", "allowed_rooms") => ConfigFieldType::StringArray,
+
+        // Mattermost arrays
+        ("mattermost", "allowed_channels") => ConfigFieldType::StringArray,
+
+        // Discourse arrays
+        ("discourse", "categories") => ConfigFieldType::StringArray,
+
+        // Guilded arrays
+        ("guilded", "server_ids") => ConfigFieldType::StringArray,
+
+        // Webhook ports
+        ("webhook", "listen_port") => ConfigFieldType::Integer,
+
+        // Mumble ports
+        ("mumble", "port") => ConfigFieldType::Integer,
 
         // Default to string for unknown fields
         _ => ConfigFieldType::String,
