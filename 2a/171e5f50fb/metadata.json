@@ -3,7 +3,7 @@
   "checkpoint_id": "2a171e5f50fb",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "docs/harness-engineering.md",
     "scripts/harness/remediation_runner.py"
@@ -15,13 +15,20 @@
       "context": "/2a/171e5f50fb/0/context.md",
       "content_hash": "/2a/171e5f50fb/0/content_hash.txt",
       "prompt": "/2a/171e5f50fb/0/prompt.txt"
+    },
+    {
+      "metadata": "/2a/171e5f50fb/1/metadata.json",
+      "transcript": "/2a/171e5f50fb/1/full.jsonl",
+      "context": "/2a/171e5f50fb/1/context.md",
+      "content_hash": "/2a/171e5f50fb/1/content_hash.txt",
+      "prompt": "/2a/171e5f50fb/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 3,
+    "input_tokens": 5,
     "cache_creation_tokens": 32630,
-    "cache_read_tokens": 0,
-    "output_tokens": 1,
-    "api_call_count": 1
+    "cache_read_tokens": 32632,
+    "output_tokens": 2,
+    "api_call_count": 2
   }
 }
