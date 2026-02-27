@@ -1,0 +1,45 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "2a171e5f50fb",
+  "session_id": "31476103-fb50-49ac-83e7-861eaec425a9",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-27T23:45:14.634364Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/harness-engineering.md",
+    "scripts/harness/remediation_runner.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "6c2a0b61512f",
+  "token_usage": {
+    "input_tokens": 3,
+    "cache_creation_tokens": 32630,
+    "cache_read_tokens": 0,
+    "output_tokens": 1,
+    "api_call_count": 1
+  },
+  "summary": {
+    "intent": "The user was testing the assistant's ability to follow simple, explicit instructions by requesting a specific response.",
+    "outcome": "The assistant correctly followed the instruction and replied with only the requested phrase. Two files were modified related to harness engineering and remediation.",
+    "learnings": {
+      "repo": [
+        "Project contains harness engineering documentation and scripts",
+        "Remediation functionality is part of the harness system"
+      ],
+      "code": [],
+      "workflow": []
+    },
+    "friction": [],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-27T23:45:08.701266Z",
+    "agent_lines": 5,
+    "human_added": 492,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 497,
+    "agent_percentage": 1.0060362173038229
+  }
+}
