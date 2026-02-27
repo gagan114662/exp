@@ -1,0 +1,164 @@
+Implement the following plan:
+
+# Plan: Subprocess LLM Drivers for Claude Code + Codex CLI
+
+## Context
+
+OpenFang agents need LLM access, but the user authenticates via **Claude Code OAuth** and **Codex CLI ChatGPT OAuth** — neither token works against standard API endpoints (`api.anthropic.com` rejects OAuth, `api.openai.com` returns "insufficient_quota" for ChatGPT tokens). The solution: spawn the CLI binaries as subprocesses, since both `claude -p` and `codex exec` handle auth internally.
+
+**Verified working:**
+- `claude -p "prompt" --output-format json` → returns JSON with `result`, `usage`, `total_cost_usd`
+- `codex exec "prompt" --json` → returns JSONL with `item.completed` events and `turn.completed` usage
+
+## Changes
+
+### 1. New file: `crates/openfang-runtime/src/drivers/claude_code.rs`
+
+**ClaudeCodeDriver** struct (no fields needed — stateless subprocess spawner):
+
+```rust
+pub struct ClaudeCodeDriver;
+```
+
+**`complete()` implementation:**
+1. Convert `CompletionRequest` messages → single prompt string (role-prefixed lines)
+2. If `request.system` is set, pass `--system-prompt`
+3. Spawn: `claude -p --output-format json --model <request.model>`
+4. Pipe prompt to stdin, read stdout
+5. Parse JSON: extract `result` → `ContentBlock::Text`, `usage.input_tokens` + `usage.output_tokens` → `TokenUsage`
+6. Timeout: 120 seconds
+7. On error: map to `LlmError::Api` or `LlmError::Http`
+
+**No tool use** — CLI doesn't support OpenFang's tool protocol. Return text-only responses.
+**No custom stream impl** — use default (wraps `complete()`).
+
+### 2. New file: `crates/openfang-runtime/src/drivers/codex_cli.rs`
+
+**CodexCliDriver** struct (no fields):
+
+```rust
+pub struct CodexCliDriver;
+```
+
+**`complete()` implementation:**
+1. Convert messages → single prompt string
+2. Spawn: `codex exec --json --model <request.model> "<prompt>"`
+3. Read stdout JSONL, collect all `item.completed` events where `item.type == "agent_message"`
+4. Concatenate text from agent_message items
+5. Parse `turn.completed` event for `usage.input_tokens` + `usage.output_tokens`
+6. Timeout: 120 seconds
+7. Codex has no `--system-prompt` flag — prepend system prompt to the user prompt if present
+
+### 3. Edit: `crates/openfang-runtime/src/drivers/mod.rs`
+
+- Add `pub mod claude_code;` and `pub mod codex_cli;`
+- Add match cases in `create_driver()`:
+  - `"claude-code"` → `Ok(Arc::new(claude_code::ClaudeCodeDriver))`
+  - `"codex"` → `Ok(Arc::new(codex_cli::CodexCliDriver))`
+- No API key required for either (auth handled by CLI)
+
+### 4. Edit: `~/.openfang/config.toml`
+
+Update config to use the new providers:
+
+```toml
+[default_model]
+provider = "codex"
+model = "gpt-4o"
+
+[[fallback_providers]]
+provider = "claude-code"
+model = "sonnet"
+```
+
+### 5. Edit: `crates/openfang-runtime/src/model_catalog.rs`
+
+Update `detect_auth()` to show "claude-code" and "codex" as configured when their binaries are found on PATH (use `which` check).
+
+## Message Serialization
+
+Convert `Vec<Message>` to prompt string:
+```
+[System prompt if present]
+
+User: message text
+Assistant: response text
+User: latest message
+```
+
+For Blocks content, extract text blocks and tool results into readable format.
+
+## Files to Create/Modify
+
+| File | Action |
+|------|--------|
+| `crates/openfang-runtime/src/drivers/claude_code.rs` | **Create** |
+| `crates/openfang-runtime/src/drivers/codex_cli.rs` | **Create** |
+| `crates/openfang-runtime/src/drivers/mod.rs` | **Edit** — add modules + create_driver cases |
+| `crates/openfang-runtime/src/model_catalog.rs` | **Edit** — auth detection |
+| `~/.openfang/config.toml` | **Edit** — switch to codex/claude-code providers |
+
+## Verification
+
+1. `cargo build --workspace --lib` — must compile
+2. `cargo test --workspace` — all tests pass
+3. `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings
+4. Live test: Start daemon, send message to agent, verify response comes through CLI subprocess
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gaganarora/.claude/projects/-Users-gaganarora-Desktop-my-projects-open-fang/4e2e5d53-a104-4530-b03e-0ec740e8b832.jsonl
+
+If this plan can be broken down into multiple independent tasks, consider using the TeamCreate tool to create a team and parallelize the work.
+
+---
+
+<task-notification>
+<task-id>bf3bb15</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bf3bb15.output</output-file>
+<status>completed</status>
+<summary>Background command "Test claude with system prompt" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bf3bb15.output
+
+---
+
+http://127.0.0.1:50051/#agents i wanna see codex cli and  claude code cli here
+
+---
+
+start new session from here for both
+
+---
+
+Build is clean. Here's what I changed:                                        
+
+  crates/openfang-api/static/index_body.html (line ~948-955) — Added two new    
+  options to the agent spawn wizard's provider dropdown:
+  - Claude Code (CLI) → provider value claude-code                              
+  - Codex CLI → provider value codex                                            
+
+  These also already appear automatically in:
+  - Settings > Providers tab — loaded dynamically from /api/providers (already
+  in the catalog)
+  - Setup Wizard — loaded dynamically from /api/providers (shows under "Other
+  providers" since they're not in the "popular" list)
+
+  When you open http://127.0.0.1:50051/#agents and click to spawn a new agent,
+  the provider dropdown in Step 2 will now include "Claude Code (CLI)" and
+  "Codex CLI" at the bottom of the list.
+
+ i meant here
+
+---
+
+<task-notification>
+<task-id>b8721b1</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b8721b1.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary with new providers" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b8721b1.output
+
+---
+
+[Image: source: /var/folders/79/x0hsq2wj3qz0d3k35271zm5w0000gn/T/TemporaryItems/NSIRD_screencaptureui_GeW7Bl/Screenshot 2026-02-27 at 6.44.40 PM.png]

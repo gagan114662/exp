@@ -1,0 +1,91 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "2a171e5f50fb",
+  "session_id": "95f1c337-3d8a-4d8f-bdac-ba64666e042f",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-27T23:46:42.974945Z",
+  "branch": "main",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".github/workflows/sentry-remediation-agent.yml",
+    "docs/harness-engineering.md",
+    "scripts/harness/remediation_runner.py",
+    "scripts/harness/sentry_findings.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "7a542ebc60b9",
+  "token_usage": {
+    "input_tokens": 84,
+    "cache_creation_tokens": 249569,
+    "cache_read_tokens": 5573421,
+    "output_tokens": 602,
+    "api_call_count": 70
+  },
+  "summary": {
+    "intent": "Implement subprocess-based LLM drivers for Claude Code and Codex CLI to enable OpenFang agents to use OAuth-authenticated CLI tools instead of direct API access, which fails with 'insufficient_quota' or authentication errors.",
+    "outcome": "Successfully implemented ClaudeCodeDriver and CodexCliDriver with subprocess spawning, JSON/JSONL parsing, message serialization, integrated them into the driver registry and model catalog with binary-on-PATH detection, updated the web UI to show both providers, rebuilt and restarted the daemon with the new providers showing as 'configured'.",
+    "learnings": {
+      "repo": [
+        "OpenFang uses a pluggable driver architecture where drivers implement LlmDriver trait and are registered in drivers/mod.rs create_driver()",
+        "Model catalog (model_catalog.rs) defines provider metadata separately from driver implementation - providers can be 'key_required: true' but use custom auth detection like binary-on-PATH checks",
+        "AuthStatus enum has #[serde(rename_all = \"snake_case\")] so 'Configured' serializes as 'configured' for JS frontend validation",
+        "Provider dropdown in agent spawn wizard is hardcoded in index_body.html, but settings page and setup wizard load dynamically from /api/providers endpoint",
+        "TokenUsage struct uses u64 fields, not u32, for input_tokens/output_tokens",
+        "Claude CLI uses 'claude -p --output-format json --system-prompt' while Codex uses 'codex exec --json' with system prompt prepended to user message"
+      ],
+      "code": [
+        {
+          "path": "crates/openfang-runtime/src/drivers/claude_code.rs",
+          "line": 1,
+          "end_line": 150,
+          "finding": "Subprocess drivers need 120s timeout, proper stdin piping for prompts, JSON parsing of CLI output with usage.input_tokens/output_tokens extraction, and error mapping to LlmError::Api or LlmError::Http"
+        },
+        {
+          "path": "crates/openfang-runtime/src/drivers/codex_cli.rs",
+          "line": 1,
+          "end_line": 150,
+          "finding": "Codex CLI returns JSONL stream - must collect item.completed events (type=agent_message) for response text and parse turn.completed event for token usage"
+        },
+        {
+          "path": "crates/openfang-runtime/src/model_catalog.rs",
+          "line": 150,
+          "end_line": 180,
+          "finding": "Custom auth detection for CLI providers uses has_binary_on_path() helper to check for 'claude' or 'codex' binaries via 'which' command, setting AuthStatus::Configured or AuthStatus::Missing"
+        },
+        {
+          "path": "crates/openfang-api/static/index_body.html",
+          "line": 948,
+          "end_line": 955,
+          "finding": "Agent spawn wizard has hardcoded provider dropdown that needs manual updates when adding new providers, unlike settings/wizard pages which load from /api/providers"
+        }
+      ],
+      "workflow": [
+        "Testing CLI subprocess drivers requires checking both JSON/JSONL parsing logic with unit tests AND verifying the actual binary works on the system with background tasks",
+        "When adding new providers, must update: driver impl, drivers/mod.rs registration, model_catalog.rs metadata, frontend HTML dropdown, config.toml examples, and provider count assertions in tests",
+        "Daemon must be rebuilt and restarted to pick up new provider code - existing agents retain their original provider/model configuration",
+        "cargo build/test/clippy --workspace catches cross-crate integration issues better than building individual crates"
+      ]
+    },
+    "friction": [
+      "Had to fix u32 vs u64 type mismatch for TokenUsage fields after initial compilation failure",
+      "Test assertion for provider count needed manual update (27 -\u003e 29) after adding two new providers",
+      "Running daemon had old code - required rebuild and restart to see new providers, not hot-reloadable",
+      "Agents created with old 'openai:gpt-4o' provider were stuck because OpenAI API key missing - couldn't use new CLI providers without spawning fresh agents"
+    ],
+    "open_items": [
+      "Verify live end-to-end message flow through codex-powered agent (message was sent at end of transcript but response not shown)",
+      "Consider making provider dropdown in index_body.html dynamically load from /api/providers to avoid manual HTML updates",
+      "Add claude-code and codex to 'popular providers' list in setup wizard if they become primary auth method",
+      "Tool use not implemented for CLI drivers - both return text-only responses, may need extension if agents require function calling"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-27T23:46:07.690747Z",
+    "agent_lines": 450,
+    "human_added": 38,
+    "human_modified": 5,
+    "human_removed": 0,
+    "total_committed": 493,
+    "agent_percentage": 91.27789046653145
+  }
+}
