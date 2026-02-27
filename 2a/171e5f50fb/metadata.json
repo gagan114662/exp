@@ -3,7 +3,7 @@
   "checkpoint_id": "2a171e5f50fb",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 14,
+  "checkpoints_count": 15,
   "files_touched": [
     ".github/workflows/sentry-remediation-agent.yml",
     "docs/harness-engineering.md",
@@ -38,13 +38,20 @@
       "context": "/2a/171e5f50fb/3/context.md",
       "content_hash": "/2a/171e5f50fb/3/content_hash.txt",
       "prompt": "/2a/171e5f50fb/3/prompt.txt"
+    },
+    {
+      "metadata": "/2a/171e5f50fb/4/metadata.json",
+      "transcript": "/2a/171e5f50fb/4/full.jsonl",
+      "context": "/2a/171e5f50fb/4/context.md",
+      "content_hash": "/2a/171e5f50fb/4/content_hash.txt",
+      "prompt": "/2a/171e5f50fb/4/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 309,
-    "cache_creation_tokens": 595111,
-    "cache_read_tokens": 17724894,
-    "output_tokens": 2633,
-    "api_call_count": 228
+    "input_tokens": 311,
+    "cache_creation_tokens": 608153,
+    "cache_read_tokens": 17744484,
+    "output_tokens": 2634,
+    "api_call_count": 229
   }
 }
