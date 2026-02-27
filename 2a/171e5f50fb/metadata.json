@@ -3,10 +3,12 @@
   "checkpoint_id": "2a171e5f50fb",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 2,
+  "checkpoints_count": 9,
   "files_touched": [
+    ".github/workflows/sentry-remediation-agent.yml",
     "docs/harness-engineering.md",
-    "scripts/harness/remediation_runner.py"
+    "scripts/harness/remediation_runner.py",
+    "scripts/harness/sentry_findings.py"
   ],
   "sessions": [
     {
@@ -22,13 +24,20 @@
       "context": "/2a/171e5f50fb/1/context.md",
       "content_hash": "/2a/171e5f50fb/1/content_hash.txt",
       "prompt": "/2a/171e5f50fb/1/prompt.txt"
+    },
+    {
+      "metadata": "/2a/171e5f50fb/2/metadata.json",
+      "transcript": "/2a/171e5f50fb/2/full.jsonl",
+      "context": "/2a/171e5f50fb/2/context.md",
+      "content_hash": "/2a/171e5f50fb/2/content_hash.txt",
+      "prompt": "/2a/171e5f50fb/2/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 5,
-    "cache_creation_tokens": 32630,
-    "cache_read_tokens": 32632,
-    "output_tokens": 2,
-    "api_call_count": 2
+    "input_tokens": 225,
+    "cache_creation_tokens": 345542,
+    "cache_read_tokens": 12151473,
+    "output_tokens": 2031,
+    "api_call_count": 158
   }
 }
