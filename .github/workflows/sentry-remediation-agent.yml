@@ -153,7 +153,23 @@ jobs:
 
           if [ -f "$CODEX_HOME/auth.json" ]; then
             chmod 600 "$CODEX_HOME/auth.json"
-            codex login status
+            if ! codex login status > /tmp/codex-login-status.log 2>&1; then
+              echo "::error::Codex auth.json is present but login status check failed."
+              cat /tmp/codex-login-status.log || true
+              echo "Refresh your CI auth secret from a valid local Codex login."
+              echo "Example: base64 < ~/.codex/auth.json | tr -d '\\n'"
+              echo "Update GitHub secret CODEX_AUTH_JSON_B64 with that value."
+              exit 1
+            fi
+            cat /tmp/codex-login-status.log
+
+            if ! timeout 120 codex exec --skip-git-repo-check --ephemeral --color never "Reply with OK only." > /tmp/codex-auth-smoke.log 2>&1; then
+              echo "::error::Codex authenticated smoke test failed. auth.json may be expired or invalid."
+              tail -n 120 /tmp/codex-auth-smoke.log || true
+              echo "Refresh local Codex login, then update CODEX_AUTH_JSON_B64."
+              echo "Command: base64 < ~/.codex/auth.json | tr -d '\\n'"
+              exit 1
+            fi
           elif [ -n "${OPENAI_API_KEY:-}" ]; then
             echo "Using OPENAI_API_KEY auth mode for codex."
           else
