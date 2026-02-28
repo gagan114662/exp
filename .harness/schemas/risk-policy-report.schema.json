@@ -27,7 +27,7 @@
     },
     "risk_tier": {
       "type": "string",
-      "enum": ["high", "medium", "low"]
+      "enum": ["critical", "high", "medium", "low"]
     },
     "changed_files": {
       "type": "array",

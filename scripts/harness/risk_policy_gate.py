@@ -15,6 +15,7 @@ from checks_resolver import (
     compute_required_checks,
     compute_risk_tier,
     evaluate_docs_drift,
+    get_evidence_policy,
     get_rollout_settings,
     load_contract,
     read_changed_files,
@@ -76,14 +77,26 @@ def _write_json(path: str, payload: Dict[str, Any]) -> None:
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return lowered in {"1", "true", "yes", "on", "enabled", "labeled-only"}
+    return False
+
+
 def main() -> int:
     args = parse_args()
 
     contract = load_contract(args.contract)
     changed_files = read_changed_files(args.changed_files)
-    risk_tier = compute_risk_tier(changed_files, contract.get("riskTierRules", {}))
+    risk_tier = compute_risk_tier(changed_files, contract)
     required_checks = compute_required_checks(contract, risk_tier)
     rollout_phase, rollout_settings = get_rollout_settings(contract)
+    evidence_policy = get_evidence_policy(contract)
 
     review_policy = contract.get("reviewPolicy", {})
     provider = str(review_policy.get("provider", "greptile"))
@@ -131,15 +144,16 @@ def main() -> int:
 
     docs_violations = evaluate_docs_drift(changed_files, contract.get("docsDriftRules", []))
 
-    evidence_policy = contract.get("evidencePolicy", {})
     evidence_needed = requires_browser_evidence(changed_files, contract)
     evidence_errors: List[str] = []
     if evidence_needed:
         evidence_ok, evidence_errors, _ = verify_manifest(
             args.browser_evidence_manifest,
             head_sha=args.head_sha,
-            required_flows=evidence_policy.get("requiredFlows", []),
-            required_assertions=evidence_policy.get("requiredAssertions", []),
+            required_flows=evidence_policy.get("required_flows", []),
+            required_assertions=evidence_policy.get("required_assertions", []),
+            min_screenshots=int(evidence_policy.get("min_screenshots", 2)),
+            min_videos=int(evidence_policy.get("min_videos", 1)),
         )
         if evidence_ok:
             evidence_errors = []
@@ -147,9 +161,9 @@ def main() -> int:
     decision = "pass"
     reasons: List[str] = []
 
-    enforce_docs_drift = bool(rollout_settings.get("enforceDocsDrift", False))
-    enforce_evidence = bool(rollout_settings.get("enforceEvidence", False))
-    enable_remediation = bool(rollout_settings.get("enableRemediation", False))
+    enforce_docs_drift = _as_bool(rollout_settings.get("enforceDocsDrift", False))
+    enforce_evidence = _as_bool(rollout_settings.get("enforceEvidence", False))
+    enable_remediation = _as_bool(rollout_settings.get("enableRemediation", False))
 
     def record_reason(message: str, *, enforced: bool) -> None:
         if enforced:
@@ -217,7 +231,7 @@ def main() -> int:
 
     _write_json(args.report_out, report)
 
-    enforce_merge_block = bool(rollout_settings.get("enforceMergeBlock", False))
+    enforce_merge_block = _as_bool(rollout_settings.get("enforceMergeBlock", False))
     should_fail_job = enforce_merge_block and decision != "pass"
 
     print(json.dumps(report, indent=2, sort_keys=True))

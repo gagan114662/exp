@@ -1,0 +1,83 @@
+{
+  "version": "1.0.0",
+  "description": "Universal PR review acceptance checklist contract",
+  "core": [
+    {
+      "id": "diff_scoped_coherent",
+      "title": "Diff is scoped and coherent",
+      "description": "Change set stays within expected scope and file-count guardrails."
+    },
+    {
+      "id": "required_ci_signals_green",
+      "title": "Required CI signals are green",
+      "description": "No required CI check is currently failing for this head SHA."
+    },
+    {
+      "id": "evidence_package_exists",
+      "title": "Evidence package exists",
+      "description": "Evidence manifest and artifacts are present and readable."
+    },
+    {
+      "id": "minimum_screenshots",
+      "title": "At least 2 screenshots captured",
+      "description": "PR evidence contains at least the configured screenshot minimum."
+    },
+    {
+      "id": "minimum_videos",
+      "title": "At least 1 video captured",
+      "description": "PR evidence contains at least the configured video minimum."
+    },
+    {
+      "id": "no_harness_policy_violations",
+      "title": "No harness policy violations",
+      "description": "Risk/policy gate decision is in an allowed pass state."
+    }
+  ],
+  "path_rules": [
+    {
+      "name": "ui-impact",
+      "when_touched": [
+        "crates/openfang-api/static/**",
+        "crates/openfang-desktop/**",
+        "public/**"
+      ],
+      "criteria": [
+        "ui_evidence_assertions_pass"
+      ]
+    },
+    {
+      "name": "api-runtime-impact",
+      "when_touched": [
+        "crates/openfang-api/**",
+        "crates/openfang-runtime/**",
+        "crates/openfang-kernel/**",
+        "crates/openfang-types/**"
+      ],
+      "criteria": [
+        "api_runtime_validation_present"
+      ]
+    },
+    {
+      "name": "docs-config-impact",
+      "when_touched": [
+        "docs/**",
+        "*.md",
+        "*.toml.example"
+      ],
+      "criteria": [
+        "docs_consistency_reviewed"
+      ]
+    }
+  ],
+  "verifier_map": {
+    "diff_scoped_coherent": "verify_diff_scope",
+    "required_ci_signals_green": "verify_required_ci_signals",
+    "evidence_package_exists": "verify_evidence_package",
+    "minimum_screenshots": "verify_minimum_screenshots",
+    "minimum_videos": "verify_minimum_videos",
+    "no_harness_policy_violations": "verify_policy_state",
+    "ui_evidence_assertions_pass": "verify_ui_evidence_assertions",
+    "api_runtime_validation_present": "verify_api_runtime_validation",
+    "docs_consistency_reviewed": "verify_docs_consistency"
+  }
+}

@@ -20,18 +20,25 @@ def _iso_datetime(value: str) -> bool:
 
 
 def _validate_required_fields(payload: Dict[str, Any], errors: List[str]) -> None:
-    required = ["head_sha", "captured_at", "flows", "artifacts", "assertions"]
+    required = ["head_sha", "captured_at", "summary", "flows", "artifacts", "assertions"]
     for field in required:
         if field not in payload:
             errors.append(f"missing required field '{field}'")
 
 
-def _validate_artifacts(manifest_path: Path, artifacts: Sequence[Dict[str, Any]], errors: List[str]) -> None:
+def _validate_artifacts(manifest_path: Path, artifacts: Sequence[Dict[str, Any]], errors: List[str]) -> Dict[str, int]:
+    counts = {"screenshot": 0, "video": 0, "log": 0, "report": 0}
     for idx, artifact in enumerate(artifacts, start=1):
         label = f"artifact[{idx}]"
-        for field in ["path", "sha256", "size_bytes"]:
+        for field in ["kind", "path", "sha256", "size_bytes"]:
             if field not in artifact:
                 errors.append(f"{label}: missing '{field}'")
+
+        kind = str(artifact.get("kind", "")).lower()
+        if kind not in counts:
+            errors.append(f"{label}: invalid kind '{kind}'")
+        else:
+            counts[kind] += 1
 
         rel_path = str(artifact.get("path", ""))
         expected_hash = str(artifact.get("sha256", "")).lower()
@@ -58,6 +65,7 @@ def _validate_artifacts(manifest_path: Path, artifacts: Sequence[Dict[str, Any]]
         digest = hashlib.sha256(file_path.read_bytes()).hexdigest().lower()
         if expected_hash and digest != expected_hash:
             errors.append(f"{label}: sha256 mismatch for {rel_path}")
+    return counts
 
 
 def verify_manifest(
@@ -66,6 +74,8 @@ def verify_manifest(
     head_sha: Optional[str] = None,
     required_flows: Optional[Sequence[str]] = None,
     required_assertions: Optional[Sequence[str]] = None,
+    min_screenshots: int = 2,
+    min_videos: int = 1,
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     errors: List[str] = []
     path = Path(manifest_path)
@@ -95,6 +105,11 @@ def verify_manifest(
     if not isinstance(assertions, list):
         errors.append("assertions must be an array")
         assertions = []
+
+    summary = payload.get("summary", {})
+    if not isinstance(summary, dict):
+        errors.append("summary must be an object")
+        summary = {}
 
     artifacts = payload.get("artifacts", [])
     if not isinstance(artifacts, list):
@@ -130,7 +145,25 @@ def verify_manifest(
             errors.append(f"assertion[{idx}] has invalid status '{status}'")
 
     typed_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
-    _validate_artifacts(path, typed_artifacts, errors)
+    counts = _validate_artifacts(path, typed_artifacts, errors)
+
+    if counts["screenshot"] < min_screenshots:
+        errors.append(
+            f"insufficient screenshots: expected >= {min_screenshots}, found {counts['screenshot']}"
+        )
+    if counts["video"] < min_videos:
+        errors.append(
+            f"insufficient videos: expected >= {min_videos}, found {counts['video']}"
+        )
+
+    summary_screenshots = summary.get("screenshots")
+    if isinstance(summary_screenshots, int) and summary_screenshots != counts["screenshot"]:
+        errors.append(
+            f"summary.screenshots mismatch: expected {counts['screenshot']}, got {summary_screenshots}"
+        )
+    summary_videos = summary.get("videos")
+    if isinstance(summary_videos, int) and summary_videos != counts["video"]:
+        errors.append(f"summary.videos mismatch: expected {counts['video']}, got {summary_videos}")
 
     return len(errors) == 0, errors, payload
 
@@ -146,6 +179,8 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Assertion name that must exist with pass status (repeatable)",
     )
+    parser.add_argument("--min-screenshots", type=int, default=2, help="Minimum screenshot artifacts")
+    parser.add_argument("--min-videos", type=int, default=1, help="Minimum video artifacts")
     return parser.parse_args()
 
 
@@ -156,6 +191,8 @@ def main() -> int:
         head_sha=args.head_sha or None,
         required_flows=args.required_flow,
         required_assertions=args.required_assertion,
+        min_screenshots=max(0, args.min_screenshots),
+        min_videos=max(0, args.min_videos),
     )
 
     result = {

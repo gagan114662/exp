@@ -7,6 +7,7 @@
   "required": [
     "head_sha",
     "captured_at",
+    "summary",
     "flows",
     "artifacts",
     "assertions"
@@ -20,6 +21,18 @@
       "type": "string",
       "format": "date-time"
     },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["screenshots", "videos", "logs", "reports", "ui_impact"],
+      "properties": {
+        "screenshots": {"type": "integer", "minimum": 0},
+        "videos": {"type": "integer", "minimum": 0},
+        "logs": {"type": "integer", "minimum": 0},
+        "reports": {"type": "integer", "minimum": 0},
+        "ui_impact": {"type": "boolean"}
+      }
+    },
     "flows": {
       "type": "array",
       "items": {
@@ -31,8 +44,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "sha256", "size_bytes"],
+        "required": ["kind", "path", "sha256", "size_bytes"],
         "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["screenshot", "video", "log", "report"]
+          },
           "path": {"type": "string"},
           "sha256": {
             "type": "string",

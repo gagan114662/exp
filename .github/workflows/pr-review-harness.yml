@@ -1,0 +1,394 @@
+name: pr-review-harness
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number for trusted maintainer rerun"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: pr-review-harness-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-context:
+    name: resolve-context
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+      head_sha: ${{ steps.ctx.outputs.head_sha }}
+      head_repo: ${{ steps.ctx.outputs.head_repo }}
+      head_ref: ${{ steps.ctx.outputs.head_ref }}
+      is_fork: ${{ steps.ctx.outputs.is_fork }}
+      trusted_rerun: ${{ steps.ctx.outputs.trusted_rerun }}
+      should_block_fork: ${{ steps.ctx.outputs.should_block_fork }}
+    steps:
+      - name: Resolve PR context
+        id: ctx
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const eventName = context.eventName;
+
+            let pr;
+            let trustedRerun = false;
+            if (eventName === 'pull_request') {
+              pr = context.payload.pull_request;
+            } else if (eventName === 'workflow_dispatch') {
+              const inputPr = Number(core.getInput('pr_number', { required: true }));
+              const actor = context.actor;
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner,
+                repo,
+                username: actor,
+              });
+              const level = String(perm.data.permission || '');
+              const allowed = ['admin', 'maintain', 'write'].includes(level);
+              if (!allowed) {
+                core.setFailed(`workflow_dispatch trusted rerun denied for actor=${actor} permission=${level}`);
+                return;
+              }
+              trustedRerun = true;
+              const prResp = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: inputPr,
+              });
+              pr = prResp.data;
+            } else {
+              core.setFailed(`Unsupported event: ${eventName}`);
+              return;
+            }
+
+            const prNumber = Number(pr.number);
+            const headSha = String(pr.head.sha);
+            const headRepo = String(pr.head.repo.full_name);
+            const headRef = String(pr.head.ref);
+            const isFork = headRepo !== `${owner}/${repo}`;
+            const shouldBlockFork = isFork && !trustedRerun;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+            const changed = files.map((item) => item.filename);
+            fs.mkdirSync('artifacts/context', { recursive: true });
+            fs.writeFileSync('artifacts/context/changed_files.txt', changed.join('\n') + '\n');
+            fs.writeFileSync(
+              'artifacts/context/context.json',
+              JSON.stringify(
+                {
+                  pr_number: prNumber,
+                  head_sha: headSha,
+                  head_repo: headRepo,
+                  head_ref: headRef,
+                  is_fork: isFork,
+                  trusted_rerun: trustedRerun,
+                  should_block_fork: shouldBlockFork,
+                  changed_files: changed,
+                },
+                null,
+                2
+              ) + '\n'
+            );
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', headSha);
+            core.setOutput('head_repo', headRepo);
+            core.setOutput('head_ref', headRef);
+            core.setOutput('is_fork', String(isFork));
+            core.setOutput('trusted_rerun', String(trustedRerun));
+            core.setOutput('should_block_fork', String(shouldBlockFork));
+
+      - name: Upload context artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-context
+          path: artifacts/context/
+          if-no-files-found: error
+
+  collect-evidence:
+    name: collect-evidence
+    needs: resolve-context
+    if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      gate_exit_code: ${{ steps.gate.outputs.exit_code }}
+      evidence_exit_code: ${{ steps.verify.outputs.exit_code }}
+      ui_impact: ${{ steps.ui.outputs.ui_impact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-context.outputs.head_repo }}
+          ref: ${{ needs.resolve-context.outputs.head_ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Download context artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-review-context
+          path: .
+
+      - name: Install media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+
+      - name: Detect UI impact
+        id: ui
+        run: |
+          python3 - <<'PY'
+          from checks_resolver import load_contract, read_changed_files, requires_browser_evidence
+          contract = load_contract(".harness/policy.contract.json")
+          changed = read_changed_files("artifacts/context/changed_files.txt")
+          ui = requires_browser_evidence(changed, contract)
+          with open("/tmp/ui_impact.out", "w", encoding="utf-8") as f:
+              f.write("true" if ui else "false")
+          PY
+          echo "ui_impact=$(cat /tmp/ui_impact.out)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node for optional Playwright
+        if: ${{ steps.ui.outputs.ui_impact == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Optional Playwright capture
+        if: ${{ steps.ui.outputs.ui_impact == 'true' && vars.OPENFANG_ENABLE_PLAYWRIGHT == '1' }}
+        env:
+          OPENFANG_ENABLE_PLAYWRIGHT: ${{ vars.OPENFANG_ENABLE_PLAYWRIGHT }}
+          OPENFANG_UI_BASE_URL: ${{ vars.OPENFANG_UI_BASE_URL }}
+          OPENFANG_PLAYWRIGHT_ROUTES: ${{ vars.OPENFANG_PLAYWRIGHT_ROUTES }}
+          OPENFANG_UI_IMPACT: ${{ steps.ui.outputs.ui_impact }}
+          PLAYWRIGHT_RESULT_OUT: artifacts/playwright-evidence.json
+          PLAYWRIGHT_MANIFEST: artifacts/browser-evidence-manifest.json
+          PLAYWRIGHT_EVIDENCE_DIR: artifacts/pr-review/evidence
+        run: |
+          npm --version
+          npx -y playwright@1.52.0 install chromium || true
+          node scripts/harness/playwright_capture.mjs || true
+
+      - name: Generate deterministic evidence package
+        run: |
+          python3 scripts/harness/evidence_capture.py \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --changed-files artifacts/context/changed_files.txt \
+            --risk-report artifacts/risk-policy-report.json \
+            --out-dir artifacts/pr-review/evidence \
+            --out-manifest artifacts/browser-evidence-manifest.json \
+            --ui-impact "${{ steps.ui.outputs.ui_impact }}" \
+            --playwright-json artifacts/playwright-evidence.json
+
+      - name: Run risk policy gate
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/harness/risk_policy_gate.py \
+            --pr "${{ needs.resolve-context.outputs.pr_number }}" \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --changed-files artifacts/context/changed_files.txt \
+            --repo "${{ github.repository }}" \
+            --review-findings artifacts/review-findings.json \
+            --browser-evidence-manifest artifacts/browser-evidence-manifest.json \
+            --report-out artifacts/risk-policy-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Verify evidence manifest
+        id: verify
+        run: |
+          set +e
+          cmd=(python3 scripts/harness/browser_evidence_verify.py \
+            --manifest artifacts/browser-evidence-manifest.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --min-screenshots 2 \
+            --min-videos 1)
+
+          if [ "${{ steps.ui.outputs.ui_impact }}" = "true" ]; then
+            cmd+=(--required-assertion ui_screenshot_evidence)
+            cmd+=(--required-assertion ui_video_evidence)
+          fi
+
+          "${cmd[@]}"
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload PR review evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-evidence
+          path: |
+            artifacts/context/changed_files.txt
+            artifacts/risk-policy-report.json
+            artifacts/review-findings.json
+            artifacts/browser-evidence-manifest.json
+            artifacts/playwright-evidence.json
+            artifacts/pr-review/evidence/
+          if-no-files-found: warn
+
+  generate-packet:
+    name: generate-packet
+    needs: [resolve-context, collect-evidence]
+    if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      packet_exit_code: ${{ steps.packet.outputs.exit_code }}
+      checklist_all_pass: ${{ steps.packet.outputs.all_pass }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Download PR review evidence artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-review-evidence
+          path: .
+
+      - name: Build PR packet
+        id: packet
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/harness/pr_packet.py \
+            --acceptance-model .harness/acceptance.criteria.json \
+            --contract .harness/policy.contract.json \
+            --changed-files artifacts/context/changed_files.txt \
+            --risk-report artifacts/risk-policy-report.json \
+            --evidence-manifest artifacts/browser-evidence-manifest.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ needs.resolve-context.outputs.pr_number }}" \
+            --out-dir artifacts/pr-review
+          code=$?
+          set -e
+          all_pass=$(jq -r '.all_passed' artifacts/pr-review/acceptance-checklist.json 2>/dev/null || echo "false")
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "all_pass=$all_pass" >> "$GITHUB_OUTPUT"
+
+      - name: Upload PR packet artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-packet
+          path: artifacts/pr-review/
+          if-no-files-found: warn
+
+  publish:
+    name: publish
+    needs: [resolve-context, collect-evidence, generate-packet]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Download PR review packet artifact
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-review-packet
+          path: .
+
+      - name: Write fork block packet
+        if: ${{ needs.resolve-context.outputs.should_block_fork == 'true' }}
+        run: |
+          mkdir -p artifacts/pr-review
+          cat > artifacts/pr-review/pr-body-block.md <<'EOF'
+          <!-- pr-review-checklist:start -->
+          ## PR Review Harness Checklist
+
+          - Status: **BLOCKED**
+          - Reason: Fork PR requires trusted maintainer rerun (`workflow_dispatch` with `pr_number`)
+          <!-- pr-review-checklist:end -->
+          EOF
+          cat > artifacts/pr-review/pr-comment.md <<'EOF'
+          <!-- pr-review-harness -->
+          ### PR Review Harness
+
+          Status: **BLOCKED**
+
+          This PR originates from a fork and is blocked pending trusted maintainer rerun.
+          Run `pr-review-harness` via `workflow_dispatch` with this `pr_number`.
+          EOF
+
+      - name: Upsert PR review block/comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/pr_review_upsert.py \
+            --repo "${{ github.repository }}" \
+            --pr-number "${{ needs.resolve-context.outputs.pr_number }}" \
+            --body-block artifacts/pr-review/pr-body-block.md \
+            --comment-body artifacts/pr-review/pr-comment.md \
+            --out artifacts/pr-review/upsert-result.json
+
+      - name: Upload publish artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-publish
+          path: artifacts/pr-review/upsert-result.json
+          if-no-files-found: warn
+
+  enforce:
+    name: pr-review-harness
+    needs: [resolve-context, collect-evidence, generate-packet, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce PR review harness result
+        run: |
+          if [ "${{ needs.resolve-context.outputs.should_block_fork }}" = "true" ]; then
+            echo "Fork PR blocked pending trusted maintainer rerun."
+            exit 1
+          fi
+
+          if [ "${{ needs.collect-evidence.outputs.gate_exit_code }}" != "0" ]; then
+            echo "risk-policy-gate failed inside PR review harness."
+            exit 1
+          fi
+
+          if [ "${{ needs.collect-evidence.outputs.evidence_exit_code }}" != "0" ]; then
+            echo "Evidence verification failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.generate-packet.outputs.packet_exit_code }}" != "0" ]; then
+            echo "PR packet generation returned non-zero."
+            exit 1
+          fi
+
+          if [ "${{ needs.generate-packet.outputs.checklist_all_pass }}" != "true" ]; then
+            echo "Acceptance checklist did not fully pass."
+            exit 1
+          fi
+
+          echo "PR review harness passed."

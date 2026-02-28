@@ -32,6 +32,7 @@ PR sequence is strictly ordered:
 7. If gate returns stale or timeout review states, `greptile-rerun` posts one deduped rerun comment per SHA.
 8. After clean rerun, `greptile-auto-resolve-threads` can resolve bot-only unresolved threads.
 9. `sentry-remediation-agent` (scheduled or manual) can ingest unresolved Sentry issues, normalize findings, and open constrained remediation PRs.
+10. `pr-review-harness` runs on every PR and publishes acceptance checklist + screenshot/video evidence to the PR body/comment.
 
 ## Current-Head SHA Discipline
 
@@ -78,6 +79,7 @@ Produced by `scripts/harness/remediation_runner.py`.
 - `.github/workflows/greptile-auto-resolve-threads.yml`
 - `.github/workflows/harness-weekly-metrics.yml`
 - `.github/workflows/sentry-remediation-agent.yml`
+- `.github/workflows/pr-review-harness.yml`
 
 ## Rollout
 
@@ -102,6 +104,8 @@ python3 scripts/harness/risk_policy_gate.py --pr <n> --head-sha <sha> --changed-
 python3 scripts/harness/browser_evidence_verify.py --manifest artifacts/browser-evidence-manifest.json
 python3 scripts/harness/remediation_runner.py --findings artifacts/review-findings.json --head-sha <sha>
 python3 scripts/harness/sentry_findings.py --org <org> --project <project> --query "is:unresolved level:error"
+python3 scripts/harness/evidence_capture.py --head-sha <sha> --changed-files <file>
+python3 scripts/harness/pr_packet.py --changed-files <file> --risk-report <report> --evidence-manifest <manifest> --head-sha <sha>
 ```
 
 ## Notes

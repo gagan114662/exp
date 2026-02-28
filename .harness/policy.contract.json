@@ -134,6 +134,43 @@
       "skipped"
     ]
   },
+  "reviewPolicy": {
+    "provider": "greptile",
+    "checkRunName": "greptile-review",
+    "timeoutMinutes": 20,
+    "weakConfidenceThreshold": 0.55,
+    "actionableSummaryKeywords": [
+      "fix",
+      "failure",
+      "error",
+      "panic",
+      "unsafe",
+      "leak",
+      "regression"
+    ]
+  },
+  "evidencePolicy": {
+    "uiImpactPaths": [
+      "crates/openfang-api/static/**",
+      "crates/openfang-desktop/**",
+      "public/**"
+    ],
+    "requiredFlows": [
+      "diff-summary-capture",
+      "verification-summary-capture",
+      "checklist-preview-capture",
+      "implementation-walkthrough-video"
+    ],
+    "requiredAssertions": []
+  },
+  "prReviewHarness": {
+    "enabled": true,
+    "requiredCheckName": "pr-review-harness",
+    "minScreenshots": 2,
+    "minVideos": 1,
+    "maxFiles": 200,
+    "requiredEvidenceAssertions": []
+  },
   "rerunCommentDedupeMarker": "<!-- greptile-rerun-request -->",
   "remediationGuardrails": {
     "allowedPaths": [
