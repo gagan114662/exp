@@ -138,9 +138,9 @@ def _render_video(ffmpeg: str, images: List[Path], out_path: Path, duration_seco
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".txt", delete=False) as handle:
         playlist_path = Path(handle.name)
         for image in images:
-            handle.write(f"file '{image.as_posix()}'\n")
+            handle.write(f"file '{image.resolve().as_posix()}'\n")
             handle.write(f"duration {duration_seconds}\n")
-        handle.write(f"file '{images[-1].as_posix()}'\n")
+        handle.write(f"file '{images[-1].resolve().as_posix()}'\n")
 
     cmd = [
         ffmpeg,
