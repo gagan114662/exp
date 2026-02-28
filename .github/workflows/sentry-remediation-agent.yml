@@ -36,7 +36,7 @@ jobs:
     name: sentry-remediation-agent
     runs-on: ubuntu-latest
     env:
-      CODEX_HOME: ${{ runner.temp }}/codex-home
+      CODEX_HOME: ${{ github.workspace }}/.codex-home
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: ${{ vars.SENTRY_ORG_SLUG }}
       SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_SLUG }}
