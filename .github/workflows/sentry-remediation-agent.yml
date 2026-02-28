@@ -36,6 +36,7 @@ jobs:
     name: sentry-remediation-agent
     runs-on: ubuntu-latest
     env:
+      CODEX_HOME: ${{ runner.temp }}/codex-home
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: ${{ vars.SENTRY_ORG_SLUG }}
       SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_SLUG }}
@@ -122,8 +123,9 @@ jobs:
         if: ${{ steps.collect.outputs.should_remediate == 'true' && contains(env.REMEDIATION_CMD, 'codex') }}
         env:
           CODEX_INSTALL_CMD: ${{ vars.OPENFANG_CODEX_INSTALL_CMD }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_TOKEN: ${{ secrets.OPENAI_API_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -140,8 +142,24 @@ jobs:
 
           codex --version || true
 
-          if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_API_TOKEN:-}" ]; then
-            echo "Missing Codex auth secret. Set OPENAI_API_KEY (recommended) or OPENAI_API_TOKEN."
+          mkdir -p "$CODEX_HOME"
+          chmod 700 "$CODEX_HOME"
+
+          if [ -n "${CODEX_AUTH_JSON_B64:-}" ]; then
+            printf '%s' "$CODEX_AUTH_JSON_B64" | base64 --decode > "$CODEX_HOME/auth.json"
+          elif [ -n "${CODEX_AUTH_JSON:-}" ]; then
+            printf '%s\n' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+          fi
+
+          if [ -f "$CODEX_HOME/auth.json" ]; then
+            chmod 600 "$CODEX_HOME/auth.json"
+            codex login status
+          elif [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "Using OPENAI_API_KEY auth mode for codex."
+          else
+            echo "Missing Codex auth for CI."
+            echo "Set CODEX_AUTH_JSON_B64 (preferred) or CODEX_AUTH_JSON."
+            echo "You can also fallback to OPENAI_API_KEY."
             exit 1
           fi
 
