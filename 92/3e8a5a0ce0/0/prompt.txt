@@ -1,0 +1,27 @@
+start ollama
+
+---
+
+<task-notification>
+<task-id>bc809ef</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bc809ef.output</output-file>
+<status>failed</status>
+<summary>Background command "Start Ollama server" failed with exit code 1</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bc809ef.output
+
+---
+
+which mcp server are u supposed to start?
+
+---
+
+will this autostart everytime i start a new session?
+
+---
+
+yes
+
+---
+
+login where?

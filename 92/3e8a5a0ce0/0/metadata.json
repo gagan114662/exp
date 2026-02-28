@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "923e8a5a0ce0",
+  "session_id": "86a403f7-ab7b-42f2-a485-6d6d894edbc6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-28T17:37:19.30931Z",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".github/workflows/pr-review-harness.yml"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "08263e235a1c",
+  "token_usage": {
+    "input_tokens": 23,
+    "cache_creation_tokens": 17463,
+    "cache_read_tokens": 393098,
+    "output_tokens": 124,
+    "api_call_count": 11
+  },
+  "summary": {
+    "intent": "User wanted to ensure Ollama and the contextplus MCP server auto-start with every Claude Code session to avoid manual setup.",
+    "outcome": "Confirmed Ollama auto-starts on macOS login via Homebrew service, and contextplus MCP server auto-starts when opening Claude Code sessions in the project due to .mcp.json configuration.",
+    "learnings": {
+      "repo": [
+        "Project uses contextplus MCP server configured in .mcp.json with nomic-embed-text embeddings and llama3.2 chat model",
+        "contextplus provides semantic search tools (get_context_tree, semantic_code_search, get_blast_radius) that depend on Ollama"
+      ],
+      "code": [],
+      "workflow": [
+        "MCP servers defined in .mcp.json auto-start when opening Claude Code sessions in that directory",
+        "Ollama can be managed as a Homebrew service (brew services start ollama) to auto-launch on macOS login",
+        "Launch agents are stored in ~/Library/LaunchAgents/ and handle auto-start behavior on macOS"
+      ]
+    },
+    "friction": [
+      "Initial confusion about whether Ollama was running - 'ollama serve' failed because port was already in use",
+      "User unclear about which MCP server needed starting and whether it would persist across sessions",
+      "Ambiguity around 'login' terminology - user didn't immediately understand it meant macOS system login"
+    ],
+    "open_items": []
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-28T17:37:09.202726Z",
+    "agent_lines": 140,
+    "human_added": 0,
+    "human_modified": 2,
+    "human_removed": 2,
+    "total_committed": 142,
+    "agent_percentage": 98.59154929577466
+  }
+}
