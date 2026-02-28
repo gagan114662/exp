@@ -342,6 +342,10 @@ jobs:
     needs: [resolve-context, collect-evidence, generate-packet]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -352,6 +356,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: pr-review-packet
+          path: .
+
+      - name: Download PR review evidence artifact
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: pr-review-evidence
           path: .
 
       - name: Normalize PR packet paths
@@ -367,6 +378,139 @@ jobs:
           fi
           cp "$body_file" artifacts/pr-review/pr-body-block.md
           cp "$comment_file" artifacts/pr-review/pr-comment.md
+
+      - name: Normalize PR evidence media
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr-review/public-media
+
+          req_files=(
+            "01-diff-summary.png"
+            "02-verification-summary.png"
+            "03-checklist-preview.png"
+            "00-implementation-walkthrough.mp4"
+          )
+
+          for f in "${req_files[@]}"; do
+            src=$(find . -type f -name "$f" | head -1 || true)
+            if [ -z "$src" ]; then
+              echo "required media file missing after artifact download: $f"
+              exit 1
+            fi
+            cp "$src" "artifacts/pr-review/public-media/$f"
+          done
+
+          optional_files=(
+            "browser-evidence-manifest.json"
+            "acceptance-checklist.md"
+            "acceptance-checklist.json"
+          )
+          for f in "${optional_files[@]}"; do
+            src=$(find . -type f -name "$f" | head -1 || true)
+            if [ -n "$src" ]; then
+              cp "$src" "artifacts/pr-review/public-media/$f"
+            fi
+          done
+
+      - name: Publish direct-view media branch
+        id: media
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.resolve-context.outputs.pr_number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          branch="pr-review-evidence"
+          target="_pr_review_media/pr-${PR_NUMBER}/run-${RUN_ID}"
+          auth_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${repo}.git"
+          temp_dir=$(mktemp -d /tmp/pr-review-media-branch.XXXXXX)
+
+          if git ls-remote --exit-code --heads "$auth_url" "$branch" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$branch" "$auth_url" "$temp_dir"
+          else
+            git clone --depth 1 "$auth_url" "$temp_dir"
+            (
+              cd "$temp_dir"
+              git checkout --orphan "$branch"
+              git rm -rf . || true
+            )
+          fi
+
+          mkdir -p "$temp_dir/$target"
+          cp artifacts/pr-review/public-media/* "$temp_dir/$target/"
+
+          (
+            cd "$temp_dir"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$target"
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(harness): publish PR review media for PR #${PR_NUMBER} run ${RUN_ID}"
+              git push origin "$branch"
+            fi
+          )
+
+          raw_base="https://raw.githubusercontent.com/${repo}/${branch}/${target}"
+          blob_base="https://github.com/${repo}/blob/${branch}/${target}"
+          echo "raw_base=$raw_base" >> "$GITHUB_OUTPUT"
+          echo "blob_base=$blob_base" >> "$GITHUB_OUTPUT"
+
+      - name: Inject direct preview links
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        env:
+          RAW_BASE: ${{ steps.media.outputs.raw_base }}
+          BLOB_BASE: ${{ steps.media.outputs.blob_base }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          raw = os.environ["RAW_BASE"].strip()
+          blob = os.environ["BLOB_BASE"].strip()
+          if not raw or not blob:
+              raise SystemExit("missing media base URLs")
+
+          media_block = f"""<!-- pr-review-media:start -->
+          ### Direct Media Preview
+          - [Diff screenshot]({blob}/01-diff-summary.png)
+          - [Verification screenshot]({blob}/02-verification-summary.png)
+          - [Checklist screenshot]({blob}/03-checklist-preview.png)
+          - [Walkthrough video (MP4)]({blob}/00-implementation-walkthrough.mp4?raw=1)
+          - [Evidence manifest]({blob}/browser-evidence-manifest.json)
+          - [Acceptance checklist]({blob}/acceptance-checklist.md)
+
+          ![Diff screenshot]({raw}/01-diff-summary.png)
+          ![Verification screenshot]({raw}/02-verification-summary.png)
+          ![Checklist screenshot]({raw}/03-checklist-preview.png)
+          <!-- pr-review-media:end -->"""
+
+          media_re = re.compile(r"<!-- pr-review-media:start -->.*?<!-- pr-review-media:end -->", re.DOTALL)
+
+          comment_path = Path("artifacts/pr-review/pr-comment.md")
+          comment = comment_path.read_text(encoding="utf-8")
+          if media_re.search(comment):
+              comment = media_re.sub(media_block, comment)
+          else:
+              comment = comment.rstrip() + "\n\n" + media_block + "\n"
+          comment_path.write_text(comment, encoding="utf-8")
+
+          body_path = Path("artifacts/pr-review/pr-body-block.md")
+          body = body_path.read_text(encoding="utf-8")
+          if media_re.search(body):
+              body = media_re.sub(media_block, body)
+          else:
+              end_marker = "<!-- pr-review-checklist:end -->"
+              if end_marker in body:
+                  body = body.replace(end_marker, media_block + "\n" + end_marker, 1)
+              else:
+                  body = body.rstrip() + "\n\n" + media_block + "\n"
+          body_path.write_text(body, encoding="utf-8")
+          PY
 
       - name: Write fork block packet
         if: ${{ needs.resolve-context.outputs.should_block_fork == 'true' }}
