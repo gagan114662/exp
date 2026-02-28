@@ -160,3 +160,4 @@ If `requireHeadShaMatch=true`, stale `head_sha` comments are ignored.
 - Gate and fanout are designed to avoid spending CI time on PR heads already blocked by policy.
 - Remediation is constrained to contract-allowed paths and forbids control-plane bypass changes.
 - Weekly metrics track stale-review rate, rerun pressure, remediation performance, and high-tier pass rate.
+- This PR validated Claude advisory ingestion with label-gated remediation.
