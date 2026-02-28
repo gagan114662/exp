@@ -36,7 +36,7 @@ jobs:
     name: sentry-remediation-agent
     runs-on: ubuntu-latest
     env:
-      CODEX_HOME: ${{ github.workspace }}/.codex-home
+      CODEX_HOME: /tmp/openfang-codex-home
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_ORG: ${{ vars.SENTRY_ORG_SLUG }}
       SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT_SLUG }}
@@ -289,7 +289,7 @@ jobs:
           git checkout -b "$branch"
           git config user.name "openfang-remediation-bot"
           git config user.email "openfang-remediation-bot@users.noreply.github.com"
-          git add -A -- . ':(exclude)artifacts/**' ':(exclude).sentry-findings-context.md'
+          git add -A -- . ':(exclude)artifacts/**' ':(exclude).sentry-findings-context.md' ':(exclude).codex-home/**'
           git commit -m "chore(harness): sentry remediation run ${{ github.run_id }}"
           git push origin "$branch"
 
@@ -298,11 +298,14 @@ jobs:
 
       - name: Open pull request
         if: ${{ steps.commit.outputs.changed == 'true' }}
+        id: open_pr
+        continue-on-error: true
         uses: actions/github-script@v7
         env:
           BRANCH: ${{ steps.commit.outputs.branch }}
           ACTIONABLE_COUNT: ${{ steps.collect.outputs.actionable_count }}
         with:
+          github-token: ${{ secrets.OPENFANG_GH_PR_TOKEN || github.token }}
           script: |
             const fs = require('fs');
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
@@ -335,6 +338,14 @@ jobs:
               title: `chore: automated sentry remediation (${actionableCount} findings)`,
               body,
             });
+
+      - name: PR creation guidance
+        if: ${{ steps.commit.outputs.changed == 'true' && steps.open_pr.outcome == 'failure' }}
+        run: |
+          echo "Auto PR creation failed after branch push."
+          echo "Either:"
+          echo "1) enable 'Allow GitHub Actions to create and approve pull requests' in repo settings, or"
+          echo "2) add secret OPENFANG_GH_PR_TOKEN (PAT with repo scope)."
 
       - name: Upload artifacts
         if: always()
