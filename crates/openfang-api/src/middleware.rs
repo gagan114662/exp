@@ -52,8 +52,15 @@ pub async fn auth(
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    let path = request.uri().path();
+
     // If no API key configured, restrict to loopback addresses only.
     if api_key.is_empty() {
+        // Keep health probes public even when no API key is configured.
+        if path == "/health" || path == "/api/health" {
+            return next.run(request).await;
+        }
+
         let is_loopback = request
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -80,8 +87,8 @@ pub async fn auth(
     }
 
     // Public endpoints that don't require auth (dashboard needs these)
-    let path = request.uri().path();
     if path == "/"
+        || path == "/health"
         || path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/status"
