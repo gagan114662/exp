@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
     match (method, path) {
+        (_, "/health") => NonZeroU32::new(1).unwrap(),
         (_, "/api/health") => NonZeroU32::new(1).unwrap(),
+        (_, "/api/health/detail") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/status") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/version") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/tools") => NonZeroU32::new(1).unwrap(),
@@ -84,7 +86,9 @@ mod tests {
     use super::*;
     #[test]
     fn test_costs() {
+        assert_eq!(operation_cost("GET", "/health").get(), 1);
         assert_eq!(operation_cost("GET", "/api/health").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/health/detail").get(), 1);
         assert_eq!(operation_cost("GET", "/api/tools").get(), 1);
         assert_eq!(operation_cost("POST", "/api/agents/1/message").get(), 30);
         assert_eq!(operation_cost("POST", "/api/agents").get(), 50);
