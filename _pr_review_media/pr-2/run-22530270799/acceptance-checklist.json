@@ -1,0 +1,89 @@
+{
+  "active_criteria_count": 7,
+  "all_passed": true,
+  "criteria": [
+    {
+      "details": "18 changed files within maxFiles=200",
+      "id": "diff_scoped_coherent",
+      "passed": true,
+      "title": "Diff is scoped and coherent"
+    },
+    {
+      "details": "risk-policy-gate=completed/success",
+      "id": "required_ci_signals_green",
+      "passed": true,
+      "title": "Required CI signals are green"
+    },
+    {
+      "details": "manifest contains 6 artifacts",
+      "id": "evidence_package_exists",
+      "passed": true,
+      "title": "Evidence package exists"
+    },
+    {
+      "details": "3 screenshots >= required 2",
+      "id": "minimum_screenshots",
+      "passed": true,
+      "title": "At least 2 screenshots captured"
+    },
+    {
+      "details": "1 videos >= required 1",
+      "id": "minimum_videos",
+      "passed": true,
+      "title": "At least 1 video captured"
+    },
+    {
+      "details": "risk gate decision: pass",
+      "id": "no_harness_policy_violations",
+      "passed": true,
+      "title": "No harness policy violations"
+    },
+    {
+      "details": "docs/config files touched in this PR",
+      "id": "docs_consistency_reviewed",
+      "passed": true,
+      "title": "docs_consistency_reviewed"
+    }
+  ],
+  "evidence_inventory": [
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/01-diff-summary.png",
+      "sha256": "c46862781964d9f74b93e22567f1090e288bdef0ba97b458dfd314dfb5052978",
+      "size_bytes": 73672
+    },
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/02-verification-summary.png",
+      "sha256": "deb92b683119e017bc1ab8b9b2de67d0282311f7ab5d494bbd3a07426b3e4f88",
+      "size_bytes": 35624
+    },
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/03-checklist-preview.png",
+      "sha256": "1edf4e120af38817c6e87fef6e63cd1c610d4bfdc779c2f5cc6c9d26bfaed745",
+      "size_bytes": 32972
+    },
+    {
+      "kind": "video",
+      "path": "pr-review/evidence/00-implementation-walkthrough.mp4",
+      "sha256": "0c851c84651e4fe3ce8623ba470eeab340cdc1b902f5e9fb3d2383b458e2deaa",
+      "size_bytes": 124141
+    },
+    {
+      "kind": "report",
+      "path": "risk-policy-report.json",
+      "sha256": "d61f0eeff0b49e0d5608b3b1822bcbf9d6e1ffad1f3ec74e11f86938f86792fe",
+      "size_bytes": 2321
+    },
+    {
+      "kind": "log",
+      "path": "context/changed_files.txt",
+      "sha256": "01ead332eb34eba53ffe2bdfd4b6ff764209344f7ca33c6fc9a274ec9ea376bd",
+      "size_bytes": 691
+    }
+  ],
+  "generated_at": "2026-02-28T22:22:01.850509+00:00",
+  "head_sha": "015eb86e7596271b05d321beac61a9b2d56b5c1d",
+  "pr_number": 2
+}
