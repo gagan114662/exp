@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "2acbd14f4131",
+  "session_id": "86a403f7-ab7b-42f2-a485-6d6d894edbc6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-28T23:08:48.5826Z",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/workflows/sentry-remediation-agent.yml"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "3cbb70476698",
+  "token_usage": {
+    "input_tokens": 799,
+    "cache_creation_tokens": 358725,
+    "cache_read_tokens": 15086345,
+    "output_tokens": 1788,
+    "api_call_count": 176
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-28T23:05:44.079852Z",
+    "agent_lines": 5,
+    "human_added": 453,
+    "human_modified": 2,
+    "human_removed": 0,
+    "total_committed": 460,
+    "agent_percentage": 1.0869565217391304
+  }
+}

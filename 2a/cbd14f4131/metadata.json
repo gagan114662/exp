@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "2acbd14f4131",
+  "strategy": "manual-commit",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/workflows/sentry-remediation-agent.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2a/cbd14f4131/0/metadata.json",
+      "transcript": "/2a/cbd14f4131/0/full.jsonl",
+      "context": "/2a/cbd14f4131/0/context.md",
+      "content_hash": "/2a/cbd14f4131/0/content_hash.txt",
+      "prompt": "/2a/cbd14f4131/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 799,
+    "cache_creation_tokens": 358725,
+    "cache_read_tokens": 15086345,
+    "output_tokens": 1788,
+    "api_call_count": 176
+  }
+}
