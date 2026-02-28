@@ -149,6 +149,21 @@ jobs:
           name: pr-review-context
           path: .
 
+      - name: Normalize context artifact paths
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/context
+          changed_file=$(find . -type f -name changed_files.txt | head -1 || true)
+          context_file=$(find . -type f -name context.json | head -1 || true)
+          if [ -z "$changed_file" ]; then
+            echo "changed_files.txt not found after artifact download"
+            exit 1
+          fi
+          cp "$changed_file" artifacts/context/changed_files.txt
+          if [ -n "$context_file" ]; then
+            cp "$context_file" artifacts/context/context.json
+          fi
+
       - name: Install media dependencies
         run: |
           sudo apt-get update
@@ -157,7 +172,7 @@ jobs:
       - name: Detect UI impact
         id: ui
         run: |
-          python3 - <<'PY'
+          PYTHONPATH=scripts/harness python3 - <<'PY'
           from checks_resolver import load_contract, read_changed_files, requires_browser_evidence
           contract = load_contract(".harness/policy.contract.json")
           changed = read_changed_files("artifacts/context/changed_files.txt")
@@ -270,6 +285,23 @@ jobs:
           name: pr-review-evidence
           path: .
 
+      - name: Normalize evidence artifact paths
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/context artifacts/pr-review artifacts/pr-review/evidence
+          changed_file=$(find . -type f -name changed_files.txt | head -1 || true)
+          risk_report=$(find . -type f -name risk-policy-report.json | head -1 || true)
+          evidence_manifest=$(find . -type f -name browser-evidence-manifest.json | head -1 || true)
+          if [ -z "$changed_file" ] || [ -z "$evidence_manifest" ]; then
+            echo "required evidence artifacts not found after download"
+            exit 1
+          fi
+          cp "$changed_file" artifacts/context/changed_files.txt
+          if [ -n "$risk_report" ]; then
+            cp "$risk_report" artifacts/risk-policy-report.json
+          fi
+          cp "$evidence_manifest" artifacts/browser-evidence-manifest.json
+
       - name: Build PR packet
         id: packet
         env:
@@ -316,6 +348,20 @@ jobs:
         with:
           name: pr-review-packet
           path: .
+
+      - name: Normalize PR packet paths
+        if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr-review
+          body_file=$(find . -type f -name pr-body-block.md | head -1 || true)
+          comment_file=$(find . -type f -name pr-comment.md | head -1 || true)
+          if [ -z "$body_file" ] || [ -z "$comment_file" ]; then
+            echo "pr packet markdown files not found after artifact download"
+            exit 1
+          fi
+          cp "$body_file" artifacts/pr-review/pr-body-block.md
+          cp "$comment_file" artifacts/pr-review/pr-comment.md
 
       - name: Write fork block packet
         if: ${{ needs.resolve-context.outputs.should_block_fork == 'true' }}
