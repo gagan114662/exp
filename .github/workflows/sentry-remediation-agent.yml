@@ -25,6 +25,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: read
 
 concurrency:
   group: sentry-remediation-agent
@@ -56,60 +57,209 @@ jobs:
       - name: Collect Sentry findings
         id: collect
         run: |
+          set -euo pipefail
           mkdir -p artifacts
+
+          if [ -z "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo "SENTRY_AUTH_TOKEN is missing or empty"
+            exit 1
+          fi
+          if [ -z "${SENTRY_ORG:-}" ] || [ -z "${SENTRY_PROJECT:-}" ]; then
+            echo "SENTRY_ORG_SLUG / SENTRY_PROJECT_SLUG variables are missing"
+            exit 1
+          fi
+
           python3 scripts/harness/sentry_findings.py \
             --org "$SENTRY_ORG" \
             --project "$SENTRY_PROJECT" \
             --query "$INPUT_QUERY" \
             --limit "$INPUT_LIMIT" \
-            --allow-missing-token \
             --out artifacts/sentry-findings.json
+
           status=$(jq -r '.status' artifacts/sentry-findings.json)
-          count=$(jq '[.findings[] | select(.actionable)] | length' artifacts/sentry-findings.json)
+          count=$(jq '[.findings[] | select(.actionable == true)] | length' artifacts/sentry-findings.json)
+
+          echo "Collector status: $status"
+          echo "Actionable findings: $count"
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "actionable_count=$count" >> "$GITHUB_OUTPUT"
-          if [ "$status" = "success" ] && [ "$count" -gt 0 ] && [ -n "$REMEDIATION_CMD" ] && [ "$INPUT_DRY_RUN" != "true" ]; then
-            echo "should_remediate=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_remediate=false" >> "$GITHUB_OUTPUT"
+
+          if [ "$status" != "success" ]; then
+            echo "Collector failed. sentry-findings.json:"
+            cat artifacts/sentry-findings.json
+            exit 1
           fi
 
-      - name: Remediate
-        if: steps.collect.outputs.should_remediate == 'true'
+          should_remediate="false"
+          if [ "$count" -gt 0 ] && [ -n "${REMEDIATION_CMD:-}" ] && [ "$INPUT_DRY_RUN" != "true" ]; then
+            should_remediate="true"
+          fi
+
+          echo "should_remediate=$should_remediate" >> "$GITHUB_OUTPUT"
+          echo "Dry run: $INPUT_DRY_RUN"
+          echo "Should remediate: $should_remediate"
+
+      - name: Write summary
+        if: always()
         run: |
+          echo "## Sentry Remediation Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Collector status: ${{ steps.collect.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Actionable findings: ${{ steps.collect.outputs.actionable_count || '0' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Should remediate: ${{ steps.collect.outputs.should_remediate || 'false' }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run constrained remediation
+        if: ${{ steps.collect.outputs.should_remediate == 'true' }}
+        id: remediate
+        run: |
+          set +e
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("artifacts/sentry-findings.json").read_text(encoding="utf-8"))
+          findings = [f for f in payload.get("findings", []) if f.get("actionable")][:10]
+
+          lines = [
+              "You are running constrained Sentry remediation in OpenFang.",
+              "Fix actionable errors with minimal, safe edits.",
+              "Hard constraints:",
+              "- Do not touch CI/workflows/secrets/config for this task.",
+              "- Do not introduce prompt or PII leakage.",
+              "- Keep changes limited to files required by findings.",
+              "- Ensure validation command passes.",
+              "",
+              "Actionable findings:",
+          ]
+
+          for finding in findings:
+              path = finding.get("path") or "unknown"
+              line = finding.get("line") or 1
+              summary = finding.get("summary") or "Sentry issue"
+              severity = finding.get("severity") or "medium"
+              lines.append(f"- [{severity}] {summary} ({path}:{line})")
+
+          if not findings:
+              lines.append("- None")
+
+          lines.append("")
+          lines.append("Return only implemented code changes and brief verification notes.")
+          Path(".sentry-findings-context.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+          validation_args=()
+          if [ -n "${VALIDATION_CMD:-}" ]; then
+            validation_args+=(--validation-cmd "$VALIDATION_CMD")
+          fi
+
           python3 scripts/harness/remediation_runner.py \
             --findings artifacts/sentry-findings.json \
             --head-sha "$(git rev-parse HEAD)" \
             --apply-cmd "$REMEDIATION_CMD" \
-            --result-out artifacts/remediation-result.json || true
+            "${validation_args[@]}" \
+            --attempt-log /tmp/sentry-remediation-attempts.json \
+            --result-out artifacts/remediation-result.json
+          code=$?
 
-      - name: Skip result
-        if: steps.collect.outputs.should_remediate != 'true'
+          rm -f .sentry-findings-context.md
+
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Write skipped remediation result
+        if: ${{ steps.collect.outputs.should_remediate != 'true' }}
         run: |
           mkdir -p artifacts
-          echo '{"applied":false}' > artifacts/remediation-result.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Open PR
-        if: steps.collect.outputs.should_remediate == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
+          payload = {
+              "head_sha_in": "",
+              "head_sha_out": "",
+              "applied": False,
+              "files_touched": [],
+              "validation_passed": False,
+              "errors": ["remediation skipped: no actionable findings or dry_run enabled"],
+          }
+          Path("artifacts/remediation-result.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit and push remediation branch
+        if: ${{ steps.collect.outputs.should_remediate == 'true' && steps.remediate.outputs.exit_code == '0' }}
+        id: commit
         run: |
-          git diff --quiet && git diff --cached --quiet && exit 0
-          branch="codex/sentry-fix-${{ github.run_id }}"
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          branch="codex/sentry-remediation-${{ github.run_id }}-${{ github.run_attempt }}"
           git checkout -b "$branch"
-          git config user.name "remediation-bot"
-          git config user.email "remediation-bot@users.noreply.github.com"
-          git add -A
-          git commit -m "chore: sentry remediation ${{ github.run_id }}"
+          git config user.name "openfang-remediation-bot"
+          git config user.email "openfang-remediation-bot@users.noreply.github.com"
+          git add -A -- . ':(exclude)artifacts/**' ':(exclude).sentry-findings-context.md'
+          git commit -m "chore(harness): sentry remediation run ${{ github.run_id }}"
           git push origin "$branch"
-          gh pr create --title "chore: sentry remediation (${{ steps.collect.outputs.actionable_count }} findings)" --body "Auto-remediation" --base main --head "$branch"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: ${{ steps.commit.outputs.changed == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          ACTIONABLE_COUNT: ${{ steps.collect.outputs.actionable_count }}
+        with:
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const branch = process.env.BRANCH;
+            const actionableCount = Number(process.env.ACTIONABLE_COUNT || '0');
+
+            const findings = JSON.parse(fs.readFileSync('artifacts/sentry-findings.json', 'utf8'));
+            const topFindings = (findings.findings || []).filter((f) => f.actionable).slice(0, 5);
+            const bullets = topFindings.map((f) => {
+              const path = f.path ? ` (${f.path}:${f.line || 1})` : '';
+              return `- ${f.summary}${path}`;
+            });
+
+            const body = [
+              'Automated Sentry remediation run.',
+              '',
+              `- Actionable findings considered: ${actionableCount}`,
+              '',
+              'Top findings:',
+              ...(bullets.length ? bullets : ['- No actionable findings listed']),
+              '',
+              'Generated by `sentry-remediation-agent` with constrained guardrails.',
+            ].join('\n');
+
+            await github.rest.pulls.create({
+              owner,
+              repo,
+              head: branch,
+              base: 'main',
+              title: `chore: automated sentry remediation (${actionableCount} findings)`,
+              body,
+            });
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sentry-remediation-artifacts
-          path: artifacts/
-          if-no-files-found: warn
+          path: |
+            artifacts/sentry-findings.json
+            artifacts/remediation-result.json
+          if-no-files-found: error
 
-# triggered: 2026-02-28T00:13:16.571Z
+      - name: Fail when remediation command fails
+        if: ${{ steps.collect.outputs.should_remediate == 'true' && steps.remediate.outputs.exit_code != '0' }}
+        run: |
+          echo "Sentry remediation failed; check sentry-remediation-artifacts."
+          exit 1
