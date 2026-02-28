@@ -90,6 +90,11 @@ jobs:
             exit 1
           fi
 
+          if [ "$count" -gt 0 ] && [ "$INPUT_DRY_RUN" != "true" ] && [ -z "${REMEDIATION_CMD:-}" ]; then
+            echo "Actionable findings exist, but OPENFANG_SENTRY_REMEDIATION_CMD is empty."
+            exit 1
+          fi
+
           should_remediate="false"
           if [ "$count" -gt 0 ] && [ -n "${REMEDIATION_CMD:-}" ] && [ "$INPUT_DRY_RUN" != "true" ]; then
             should_remediate="true"
@@ -106,6 +111,39 @@ jobs:
           echo "- Collector status: ${{ steps.collect.outputs.status || 'failed' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Actionable findings: ${{ steps.collect.outputs.actionable_count || '0' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Should remediate: ${{ steps.collect.outputs.should_remediate || 'false' }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Node for Codex
+        if: ${{ steps.collect.outputs.should_remediate == 'true' && contains(env.REMEDIATION_CMD, 'codex') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Ensure Codex CLI and auth
+        if: ${{ steps.collect.outputs.should_remediate == 'true' && contains(env.REMEDIATION_CMD, 'codex') }}
+        env:
+          CODEX_INSTALL_CMD: ${{ vars.OPENFANG_CODEX_INSTALL_CMD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_TOKEN: ${{ secrets.OPENAI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v codex >/dev/null 2>&1; then
+            if [ -n "${CODEX_INSTALL_CMD:-}" ]; then
+              echo "Installing codex via OPENFANG_CODEX_INSTALL_CMD..."
+              bash -lc "$CODEX_INSTALL_CMD"
+            else
+              echo "codex CLI not found on runner."
+              echo "Set repo variable OPENFANG_CODEX_INSTALL_CMD (example: npm install -g @openai/codex)"
+              exit 1
+            fi
+          fi
+
+          codex --version || true
+
+          if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_API_TOKEN:-}" ]; then
+            echo "Missing Codex auth secret. Set OPENAI_API_KEY (recommended) or OPENAI_API_TOKEN."
+            exit 1
+          fi
 
       - name: Run constrained remediation
         if: ${{ steps.collect.outputs.should_remediate == 'true' }}
