@@ -155,6 +155,61 @@ If `requireHeadShaMatch=true`, stale `head_sha` comments are ignored.
 - `OPENFANG_CLAUDE_REMEDIATION_CMD`
 - `OPENFANG_CLAUDE_VALIDATION_CMD`
 
+## Codex Dual-Account Failover
+
+Both remediation workflows use `scripts/harness/codex_failover_runner.py`:
+
+- `.github/workflows/claude-remediation-agent.yml`
+- `.github/workflows/sentry-remediation-agent.yml`
+
+### Required secrets
+
+- `CODEX_AUTH_JSON_B64_PRIMARY` (preferred primary auth payload)
+- `CODEX_AUTH_JSON_B64_SECONDARY` (secondary/failover auth payload)
+
+Legacy compatibility is preserved:
+
+- `CODEX_AUTH_JSON_B64` (legacy primary fallback)
+
+### Runtime resolution order
+
+1. Primary auth = `CODEX_AUTH_JSON_B64_PRIMARY`, else `CODEX_AUTH_JSON_B64`.
+2. Secondary auth = `CODEX_AUTH_JSON_B64_SECONDARY`.
+
+### Failover policy
+
+Failover is single retry only (`primary -> secondary`) and triggers only for rate/quota signatures:
+
+- `You've hit your usage limit`
+- `rate limit`
+- `429`
+- `Too Many Requests`
+- `try again at`
+
+Non-rate failures do not retry secondary.
+
+### Failover artifact
+
+Both workflows upload:
+
+- `artifacts/codex-failover-result.json`
+
+This includes:
+
+- `used_primary`, `used_secondary`, `failover_triggered`
+- `primary_exit_code`, `secondary_exit_code`, `final_exit_code`
+- `final_account` (`primary|secondary|none`)
+- `trigger_reason` (`rate_limit|none|secondary_missing`)
+- `rate_limit_detected`
+
+### Troubleshooting
+
+| Condition | What it means | Expected behavior |
+|---|---|---|
+| `trigger_reason=secondary_missing` | Primary looked rate-limited, but no secondary secret configured | Workflow fails after primary, no retry |
+| both accounts limited | Primary and secondary both return rate/quota failures | Workflow fails; failover metadata shows both attempts |
+| non-rate primary failure | Failure was compile/test/syntax/policy/guardrail, not quota | No secondary retry; fix root cause directly |
+
 ## Notes
 
 - Gate and fanout are designed to avoid spending CI time on PR heads already blocked by policy.

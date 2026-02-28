@@ -31,6 +31,10 @@ jobs:
   sentry-remediation-agent:
     name: sentry-remediation-agent
     runs-on: ubuntu-latest
+    env:
+      CODEX_AUTH_JSON_B64_PRIMARY: ${{ secrets.CODEX_AUTH_JSON_B64_PRIMARY }}
+      CODEX_AUTH_JSON_B64_SECONDARY: ${{ secrets.CODEX_AUTH_JSON_B64_SECONDARY }}
+      CODEX_AUTH_JSON_B64_LEGACY: ${{ secrets.CODEX_AUTH_JSON_B64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +46,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
 
       - name: Collect Sentry findings
         id: collect
@@ -62,7 +69,8 @@ jobs:
           project="${SENTRY_PROJECT_SLUG:-$OPENFANG_SENTRY_PROJECT}"
           query="${{ github.event.inputs.query || 'is:unresolved level:error' }}"
           limit="${{ github.event.inputs.limit || '20' }}"
-          apply_cmd="${OPENFANG_SENTRY_REMEDIATION_CMD:-$OPENFANG_REMEDIATION_CMD}"
+          default_cmd="codex exec --json --approval-mode full-auto --quiet 'Read .sentry-findings-context.md and fix every listed issue. Only edit files under crates/. Run cargo build --workspace --lib after each fix to verify.'"
+          apply_cmd="${OPENFANG_SENTRY_REMEDIATION_CMD:-${OPENFANG_REMEDIATION_CMD:-$default_cmd}}"
           dry_run="${{ github.event.inputs.dry_run || 'false' }}"
 
           echo "org=$org" >> "$GITHUB_OUTPUT"
@@ -116,7 +124,8 @@ jobs:
         id: remediate
         env:
           APPLY_CMD: ${{ steps.collect.outputs.apply_cmd }}
-          VALIDATION_CMD: ${{ vars.OPENFANG_SENTRY_VALIDATION_CMD }}
+          VALIDATION_CMD: ${{ vars.OPENFANG_SENTRY_VALIDATION_CMD || 'cargo build --workspace --lib && cargo test --workspace' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set +e
 
@@ -164,14 +173,21 @@ jobs:
             validation_args+=(--validation-cmd "$VALIDATION_CMD")
           fi
 
-          python3 scripts/harness/remediation_runner.py \
+          python3 scripts/harness/codex_failover_runner.py \
             --findings artifacts/sentry-findings.json \
             --head-sha "$(git rev-parse HEAD)" \
             --apply-cmd "$APPLY_CMD" \
             "${validation_args[@]}" \
             --attempt-log /tmp/sentry-remediation-attempts.json \
-            --result-out artifacts/remediation-result.json
+            --result-out artifacts/remediation-result.json \
+            --failover-out artifacts/codex-failover-result.json
           code=$?
+          if [ -f artifacts/codex-failover-result.json ]; then
+            final_code=$(jq -r '.final_exit_code // empty' artifacts/codex-failover-result.json)
+            if [ -n "$final_code" ]; then
+              code="$final_code"
+            fi
+          fi
 
           rm -f .sentry-findings-context.md
 
@@ -196,6 +212,25 @@ jobs:
           }
           Path("artifacts/remediation-result.json").write_text(
               json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          Path("artifacts/codex-failover-result.json").write_text(
+              json.dumps(
+                  {
+                      "used_primary": False,
+                      "used_secondary": False,
+                      "failover_triggered": False,
+                      "primary_exit_code": -1,
+                      "secondary_exit_code": None,
+                      "final_exit_code": 0,
+                      "final_account": "none",
+                      "trigger_reason": "none",
+                      "rate_limit_detected": False,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
               encoding="utf-8",
           )
           PY
@@ -268,6 +303,7 @@ jobs:
           path: |
             artifacts/sentry-findings.json
             artifacts/remediation-result.json
+            artifacts/codex-failover-result.json
           if-no-files-found: error
 
       - name: Fail when remediation command fails

@@ -148,10 +148,31 @@ def main() -> int:
     min_screenshots = int(harness_cfg.get("minScreenshots", 2))
     min_videos = int(harness_cfg.get("minVideos", 1))
     required_check_name = str(harness_cfg.get("requiredCheckName", "pr-review-harness"))
+    review_providers = contract.get("reviewProviders", {})
+    providers_map = review_providers.get("providers", {}) if isinstance(review_providers, dict) else {}
+    greptile_cfg = providers_map.get("greptile", {}) if isinstance(providers_map.get("greptile"), dict) else {}
+    legacy_review_policy = contract.get("reviewPolicy", {}) if isinstance(contract.get("reviewPolicy"), dict) else {}
+    greptile_check_name = str(
+        greptile_cfg.get("checkRunName", legacy_review_policy.get("checkRunName", "greptile-review"))
+    )
 
     required_checks = risk_report.get("required_checks", [])
     required_checks = [str(item) for item in required_checks] if isinstance(required_checks, list) else []
     decision = str(risk_report.get("decision", "unknown"))
+    review_primary = str(risk_report.get("review_primary", "greptile") or "greptile")
+    review_states = risk_report.get("review_states", {})
+    review_states = review_states if isinstance(review_states, dict) else {}
+    greptile_report_state = review_states.get("greptile", {})
+    if not isinstance(greptile_report_state, dict):
+        greptile_report_state = {}
+    legacy_review_state = risk_report.get("review_state", {})
+    if (
+        not greptile_report_state
+        and isinstance(legacy_review_state, dict)
+        and str(legacy_review_state.get("provider", "")).lower() == "greptile"
+    ):
+        state = legacy_review_state
+        greptile_report_state = state if isinstance(state, dict) else {}
 
     check_runs = _check_runs(args.repo, args.head_sha, os.getenv(args.token_env, ""))
     check_runs_by_name: Dict[str, List[Dict[str, Any]]] = {}
@@ -160,6 +181,19 @@ def main() -> int:
             continue
         name = str(run.get("name", ""))
         check_runs_by_name.setdefault(name, []).append(run)
+
+    greptile_runs = check_runs_by_name.get(greptile_check_name, [])
+    greptile_run = (
+        sorted(greptile_runs, key=lambda item: int(item.get("id", 0)), reverse=True)[0]
+        if greptile_runs
+        else {}
+    )
+    greptile_run_status = str(greptile_run.get("status", "") or "missing")
+    greptile_run_conclusion = str(greptile_run.get("conclusion", "") or "n/a")
+    greptile_report_status = str(greptile_report_state.get("status", "") or "missing")
+    greptile_report_url = str(greptile_report_state.get("check_run_url", "") or "").strip()
+    greptile_run_url = str(greptile_run.get("html_url", "") or "").strip()
+    greptile_url = greptile_report_url or greptile_run_url
 
     def verify_diff_scope() -> Tuple[bool, str]:
         changed_count = len(changed_files)
@@ -284,6 +318,16 @@ def main() -> int:
         "active_criteria_count": len(criteria_rows),
         "criteria": criteria_rows,
         "evidence_inventory": evidence_inventory,
+        "review_providers": {
+            "primary": review_primary,
+            "greptile": {
+                "check_run_name": greptile_check_name,
+                "report_status": greptile_report_status,
+                "check_run_status": greptile_run_status,
+                "check_run_conclusion": greptile_run_conclusion,
+                "check_run_url": greptile_url,
+            },
+        },
     }
 
     claude_provider = str(claude_findings.get("provider", "")).strip().lower()
@@ -308,6 +352,20 @@ def main() -> int:
         marker = "x" if row["passed"] else " "
         md_lines.append(f"- [{marker}] **{row['title']}** (`{row['id']}`)")
         md_lines.append(f"  - {row['details']}")
+
+    md_lines.extend(
+        [
+            "",
+            "### Review Providers",
+            "",
+            f"- Primary provider: `{review_primary}`",
+            f"- Greptile check run: `{greptile_check_name}`",
+            f"- Greptile report state: `{greptile_report_status}`",
+            f"- Greptile check-run state: `{greptile_run_status}/{greptile_run_conclusion}`",
+        ]
+    )
+    if greptile_url:
+        md_lines.append(f"- Greptile link: {greptile_url}")
 
     md_lines.extend(
         [
