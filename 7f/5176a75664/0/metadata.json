@@ -1,0 +1,96 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "7f5176a75664",
+  "session_id": "86a403f7-ab7b-42f2-a485-6d6d894edbc6",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-28T22:16:50.294652Z",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 12,
+  "files_touched": [
+    ".github/workflows/pr-review-harness.yml",
+    ".github/workflows/risk-policy-gate.yml",
+    ".harness/policy.contract.json",
+    ".harness/schemas/claude-feedback.schema.json",
+    ".harness/schemas/risk-policy-report.schema.json",
+    "docs/harness-engineering.md",
+    "scripts/harness/claude_feedback_ingest.py",
+    "scripts/harness/pr_packet.py",
+    "scripts/harness/remediation_runner.py",
+    "scripts/harness/risk_policy_gate.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "9dbe57958560",
+  "token_usage": {
+    "input_tokens": 726,
+    "cache_creation_tokens": 276419,
+    "cache_read_tokens": 9284045,
+    "output_tokens": 1351,
+    "api_call_count": 111
+  },
+  "summary": {
+    "intent": "Set up automated Sentry issue remediation with three handoff modes: immediate MCP-based fixes, CLI script for local/CI use, and webhook-based assignment routing that triggers Codex or Claude when Sentry issues are assigned to them.",
+    "outcome": "Built all three modes: sentry_to_codex.sh CLI script (validates, creates PRs per issue), updated GitHub Actions workflow with Codex integration, and implemented Sentry webhook endpoint with assignee-based routing to Codex/Claude. All code compiles and tests pass (9/9 sentry routing tests green).",
+    "learnings": {
+      "repo": [
+        "The remediation pipeline was mostly built (sentry_findings.py, remediation_runner.py, GH Actions workflow) but missing the Codex CLI invocation and webhook receiver",
+        "Policy guardrails already exist in .harness/policy.contract.json (path restrictions, max files/lines, phase rollout)",
+        "Ollama is configured as a Homebrew service and auto-starts on login via ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist",
+        "The contextplus MCP server auto-starts from .mcp.json when sessions begin, providing semantic_code_search and other tools via Ollama (nomic-embed-text + llama3.2)",
+        "Sentry webhook payloads have multiple assignedTo formats: object with name/slug, string shorthand 'team:codex', and data.assignee fallback"
+      ],
+      "code": [
+        {
+          "path": "crates/openfang-runtime/src/agent_loop.rs",
+          "line": 1,
+          "end_line": 500,
+          "finding": "Agent loop never calls touch_active() during execution, causing heartbeat monitor to falsely flag agents as unresponsive during long LLM calls or tool execution"
+        },
+        {
+          "path": "crates/openfang-runtime/src/agent_loop.rs",
+          "line": 1,
+          "end_line": 500,
+          "finding": "LLM retry path (call_with_retry) has no provider fallback - after 3 retries on rate limits, it fails and logs to Sentry. 5.4K errors in 24h suggests Groq rate limits are hit consistently"
+        },
+        {
+          "path": "crates/openfang-api/src/routes.rs",
+          "line": 1,
+          "end_line": 800,
+          "finding": "Sentry webhook handler needs to parse assignedTo from multiple formats (issue.assignedTo.name, issue.assignedTo.slug, data.assignee string) to route to Codex/Claude correctly"
+        }
+      ],
+      "workflow": [
+        "GitHub Actions workflows can read repo variables via vars.VARNAME and secrets via secrets.VARNAME",
+        "Sentry internal integrations provide webhook signing secrets (Client Secret) but require separate auth tokens for API access (member:write scope)",
+        "Codex CLI invocation pattern: codex exec --json --approval-mode full-auto with system prompt and validation commands",
+        "One PR per Sentry issue (not batched) makes reviews/reverts cleaner",
+        "Branch naming strategy codex/sentry-fix-{short_id} prevents duplicate remediation runs"
+      ]
+    },
+    "friction": [
+      "Mode 1 (live Codex MCP fix) was rejected by user, blocking immediate remediation",
+      "Spent 3.5 hours in brainstorming/planning overhead before building actual code",
+      "Background agent for webhook endpoint was slow (long compile time), had to kill and finish manually",
+      "Disk full error (62GB in target/) blocked test compilation until cleanup",
+      "Sentry auth token vs webhook secret confusion - webhook secret can't be used for API calls like member invites",
+      "Email-based assignee invites failed, had to fall back to team-based assignment"
+    ],
+    "open_items": [
+      "Fix agent_loop.rs to add touch_active() calls during long operations to prevent false 'unresponsive' warnings",
+      "Add provider fallback logic in LLM retry path to handle Groq rate limits (5.4K errors/day, 58% failure rate)",
+      "Set SENTRY_WEBHOOK_SECRET env var on production OpenFang server",
+      "Replace placeholder webhook URL https://openfang.example.com/api/webhooks/sentry with actual hostname",
+      "Set GitHub secrets/vars: OPENAI_API_KEY, SENTRY_AUTH_TOKEN, SENTRY_ORG_SLUG, SENTRY_PROJECT_SLUG",
+      "Run chmod +x on scripts/sentry_to_codex.sh (blocked by sandbox)",
+      "Test end-to-end flow: assign Sentry issue to #codex team and verify webhook triggers remediation"
+    ]
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-28T22:12:49.979008Z",
+    "agent_lines": 618,
+    "human_added": 898,
+    "human_modified": 103,
+    "human_removed": 0,
+    "total_committed": 1611,
+    "agent_percentage": 38.361266294227185
+  }
+}

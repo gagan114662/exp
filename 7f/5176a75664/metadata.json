@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "7f5176a75664",
+  "strategy": "manual-commit",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 12,
+  "files_touched": [
+    ".github/workflows/pr-review-harness.yml",
+    ".github/workflows/risk-policy-gate.yml",
+    ".harness/policy.contract.json",
+    ".harness/schemas/claude-feedback.schema.json",
+    ".harness/schemas/risk-policy-report.schema.json",
+    "docs/harness-engineering.md",
+    "scripts/harness/claude_feedback_ingest.py",
+    "scripts/harness/pr_packet.py",
+    "scripts/harness/remediation_runner.py",
+    "scripts/harness/risk_policy_gate.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7f/5176a75664/0/metadata.json",
+      "transcript": "/7f/5176a75664/0/full.jsonl",
+      "context": "/7f/5176a75664/0/context.md",
+      "content_hash": "/7f/5176a75664/0/content_hash.txt",
+      "prompt": "/7f/5176a75664/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 726,
+    "cache_creation_tokens": 276419,
+    "cache_read_tokens": 9284045,
+    "output_tokens": 1351,
+    "api_call_count": 111
+  }
+}
