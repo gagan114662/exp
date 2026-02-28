@@ -336,7 +336,11 @@ jobs:
             cp "$risk_report" artifacts/risk-policy-report.json
           fi
           if [ -n "$claude_findings" ]; then
-            cp "$claude_findings" artifacts/claude-findings.json
+            src_claude="$(realpath "$claude_findings")"
+            dst_claude="$(realpath -m artifacts/claude-findings.json)"
+            if [ "$src_claude" != "$dst_claude" ]; then
+              cp "$claude_findings" artifacts/claude-findings.json
+            fi
           fi
           cp "$evidence_manifest" artifacts/browser-evidence-manifest.json
 
