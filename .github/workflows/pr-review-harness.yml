@@ -480,7 +480,8 @@ jobs:
           - [Diff screenshot]({blob}/01-diff-summary.png)
           - [Verification screenshot]({blob}/02-verification-summary.png)
           - [Checklist screenshot]({blob}/03-checklist-preview.png)
-          - [Walkthrough video (MP4)]({blob}/00-implementation-walkthrough.mp4?raw=1)
+          - [Walkthrough video (GitHub preview)]({blob}/00-implementation-walkthrough.mp4)
+          - [Walkthrough video (direct file)]({raw}/00-implementation-walkthrough.mp4)
           - [Evidence manifest]({blob}/browser-evidence-manifest.json)
           - [Acceptance checklist]({blob}/acceptance-checklist.md)
 
