@@ -10,6 +10,7 @@ use tracing::info;
 
 /// Maximum include nesting depth.
 const MAX_INCLUDE_DEPTH: u32 = 10;
+const LAST_KNOWN_GOOD_CONFIG_FILE: &str = "config.last-good.toml";
 
 /// Load kernel configuration from a TOML file, with defaults.
 ///
@@ -22,53 +23,24 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
 
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
-            Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
-                Ok(mut root_value) => {
-                    // Process includes before deserializing
-                    let config_dir = config_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .to_path_buf();
-                    let mut visited = HashSet::new();
-                    if let Ok(canonical) = std::fs::canonicalize(&config_path) {
-                        visited.insert(canonical);
-                    } else {
-                        visited.insert(config_path.clone());
-                    }
-
-                    if let Err(e) =
-                        resolve_config_includes(&mut root_value, &config_dir, &mut visited, 0)
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            "Config include resolution failed, using root config only"
-                        );
-                    }
-
-                    // Remove the `include` field before deserializing to avoid confusion
-                    if let toml::Value::Table(ref mut tbl) = root_value {
-                        tbl.remove("include");
-                    }
-
-                    match root_value.try_into::<KernelConfig>() {
-                        Ok(config) => {
-                            info!(path = %config_path.display(), "Loaded configuration");
-                            return config;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                path = %config_path.display(),
-                                "Failed to deserialize merged config, using defaults"
-                            );
-                        }
-                    }
+            Ok(contents) => match parse_config_contents(&contents, &config_path) {
+                Ok(config) => {
+                    write_last_known_good_config(&config_path, &config);
+                    info!(path = %config_path.display(), "Loaded configuration");
+                    return config;
                 }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         path = %config_path.display(),
-                        "Failed to parse config, using defaults"
+                        "Failed to load config, trying last-known-good config"
+                    );
+                    if let Some(config) = load_last_known_good_config(&config_path) {
+                        return config;
+                    }
+                    tracing::warn!(
+                        path = %config_path.display(),
+                        "No valid last-known-good config found, using defaults"
                     );
                 }
             },
@@ -76,7 +48,14 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                 tracing::warn!(
                     error = %e,
                     path = %config_path.display(),
-                    "Failed to read config file, using defaults"
+                    "Failed to read config file, trying last-known-good config"
+                );
+                if let Some(config) = load_last_known_good_config(&config_path) {
+                    return config;
+                }
+                tracing::warn!(
+                    path = %config_path.display(),
+                    "No valid last-known-good config found, using defaults"
                 );
             }
         }
@@ -88,6 +67,94 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
     }
 
     KernelConfig::default()
+}
+
+fn parse_config_contents(contents: &str, config_path: &Path) -> Result<KernelConfig, String> {
+    let mut root_value: toml::Value = toml::from_str(contents)
+        .map_err(|e| format!("failed to parse TOML at {}: {e}", config_path.display()))?;
+
+    // Process includes before deserializing
+    let config_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut visited = HashSet::new();
+    if let Ok(canonical) = std::fs::canonicalize(config_path) {
+        visited.insert(canonical);
+    } else {
+        visited.insert(config_path.to_path_buf());
+    }
+
+    if let Err(e) = resolve_config_includes(&mut root_value, &config_dir, &mut visited, 0) {
+        tracing::warn!(
+            error = %e,
+            "Config include resolution failed, using root config only"
+        );
+    }
+
+    // Remove the `include` field before deserializing to avoid confusion
+    if let toml::Value::Table(ref mut tbl) = root_value {
+        tbl.remove("include");
+    }
+
+    root_value.try_into::<KernelConfig>().map_err(|e| {
+        format!(
+            "failed to deserialize config at {}: {e}",
+            config_path.display()
+        )
+    })
+}
+
+fn last_known_good_config_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LAST_KNOWN_GOOD_CONFIG_FILE)
+}
+
+fn write_last_known_good_config(config_path: &Path, config: &KernelConfig) {
+    let backup_path = last_known_good_config_path(config_path);
+    match toml::to_string_pretty(config) {
+        Ok(serialized) => {
+            if let Err(e) = std::fs::write(&backup_path, serialized) {
+                tracing::warn!(
+                    error = %e,
+                    path = %backup_path.display(),
+                    "Failed to write last-known-good config snapshot"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %backup_path.display(),
+                "Failed to serialize last-known-good config snapshot"
+            );
+        }
+    }
+}
+
+fn load_last_known_good_config(config_path: &Path) -> Option<KernelConfig> {
+    let backup_path = last_known_good_config_path(config_path);
+    let contents = std::fs::read_to_string(&backup_path).ok()?;
+
+    match parse_config_contents(&contents, &backup_path) {
+        Ok(config) => {
+            info!(
+                path = %backup_path.display(),
+                "Loaded last-known-good configuration snapshot"
+            );
+            Some(config)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %backup_path.display(),
+                "Failed to load last-known-good config snapshot"
+            );
+            None
+        }
+    }
 }
 
 /// Resolve config includes by deep-merging included files into the root value.
@@ -430,5 +497,23 @@ mod tests {
 
         let config = load_config(Some(&root));
         assert_eq!(config.log_level, "trace");
+    }
+
+    #[test]
+    fn test_uses_last_known_good_on_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        drop(f);
+
+        let first = load_config(Some(&root));
+        assert_eq!(first.log_level, "debug");
+
+        std::fs::write(&root, "log_level = [").unwrap();
+
+        let recovered = load_config(Some(&root));
+        assert_eq!(recovered.log_level, "debug");
     }
 }
