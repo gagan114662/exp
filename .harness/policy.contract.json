@@ -150,6 +150,54 @@
       "regression"
     ]
   },
+  "reviewProviders": {
+    "mode": "alongside",
+    "primary": "greptile",
+    "providers": {
+      "greptile": {
+        "enabled": true,
+        "enforcement": "required",
+        "checkRunName": "greptile-review",
+        "timeoutMinutes": 20,
+        "weakConfidenceThreshold": 0.55,
+        "actionableSummaryKeywords": [
+          "fix",
+          "failure",
+          "error",
+          "panic",
+          "unsafe",
+          "leak",
+          "regression"
+        ]
+      },
+      "claude": {
+        "enabled": true,
+        "enforcement": "advisory",
+        "source": "github_pr_comments",
+        "github": {
+          "trustedActorLogins": [
+            "gagan114662"
+          ],
+          "trustedAppIds": [],
+          "commentMarker": "<!-- openfang-claude-feedback -->",
+          "requireHeadShaMatch": true
+        },
+        "parse": {
+          "format": "json_block",
+          "maxFindings": 200
+        }
+      }
+    }
+  },
+  "automation": {
+    "claudeRemediation": {
+      "enabled": true,
+      "triggerLabel": "claude-remediate",
+      "maxAttemptsPerSha": 1,
+      "applyCommandVar": "OPENFANG_CLAUDE_REMEDIATION_CMD",
+      "validationCommandVar": "OPENFANG_CLAUDE_VALIDATION_CMD"
+    }
+  },
   "evidencePolicy": {
     "uiImpactPaths": [
       "crates/openfang-api/static/**",

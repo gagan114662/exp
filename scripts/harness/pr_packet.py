@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contract", default=".harness/policy.contract.json", help="Harness contract JSON path")
     parser.add_argument("--changed-files", required=True, help="changed_files.txt path")
     parser.add_argument("--risk-report", required=True, help="risk-policy-report.json path")
+    parser.add_argument(
+        "--claude-findings",
+        default="artifacts/claude-findings.json",
+        help="Optional claude-findings.json path",
+    )
     parser.add_argument("--evidence-manifest", required=True, help="browser-evidence-manifest.json path")
     parser.add_argument("--head-sha", required=True, help="Head SHA under review")
     parser.add_argument("--repo", default=os.getenv("GITHUB_REPOSITORY", ""), help="owner/repo")
@@ -108,6 +113,7 @@ def main() -> int:
     contract = load_contract(args.contract)
     changed_files = read_changed_files(args.changed_files)
     risk_report = _read_json(Path(args.risk_report), {})
+    claude_findings = _read_json(Path(args.claude_findings), {})
     evidence = _read_json(Path(args.evidence_manifest), {})
 
     criterion_meta = _criterion_map(acceptance_model)
@@ -280,6 +286,16 @@ def main() -> int:
         "evidence_inventory": evidence_inventory,
     }
 
+    claude_provider = str(claude_findings.get("provider", "")).strip().lower()
+    claude_status = str(claude_findings.get("status", "")).strip().lower()
+    claude_items = claude_findings.get("findings", [])
+    claude_items = [item for item in claude_items if isinstance(item, dict)] if isinstance(claude_items, list) else []
+    claude_actionable = [item for item in claude_items if bool(item.get("actionable", False))]
+    claude_severity_counts: Dict[str, int] = {}
+    for item in claude_items:
+        severity = str(item.get("severity", "info")).lower()
+        claude_severity_counts[severity] = claude_severity_counts.get(severity, 0) + 1
+
     md_lines = [
         "## PR Review Harness Checklist",
         "",
@@ -308,6 +324,31 @@ def main() -> int:
         )
     if not evidence_inventory:
         md_lines.append("| n/a | n/a | 0 | n/a |")
+
+    if claude_provider == "claude":
+        md_lines.extend(
+            [
+                "",
+                "### Claude Advisory Feedback",
+                "",
+                f"- Provider status: `{claude_status or 'missing'}`",
+                f"- Total findings: `{len(claude_items)}`",
+                f"- Actionable findings: `{len(claude_actionable)}`",
+            ]
+        )
+        if claude_severity_counts:
+            sev_parts = [f"{key}:{claude_severity_counts[key]}" for key in sorted(claude_severity_counts.keys())]
+            md_lines.append(f"- Severity counts: `{', '.join(sev_parts)}`")
+        if claude_actionable:
+            md_lines.append("- Top actionable items:")
+            for item in claude_actionable[:5]:
+                path = str(item.get("path", "")).strip() or "unknown"
+                line = int(item.get("line", 1) or 1)
+                summary = str(item.get("summary", "")).strip() or "(no summary)"
+                md_lines.append(f"  - `{path}:{line}` {summary}")
+        errors = claude_findings.get("errors", [])
+        if isinstance(errors, list) and errors:
+            md_lines.append(f"- Ingestion errors: `{len(errors)}` (see `claude-findings.json` artifact)")
 
     checklist_md = "\n".join(md_lines) + "\n"
     comment_md = (

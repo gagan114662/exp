@@ -18,6 +18,8 @@ This contract controls:
 - constrained remediation guardrails
 - browser evidence requirements
 - phased rollout policy
+- review provider orchestration (`reviewProviders`)
+- Claude label-gated remediation automation (`automation.claudeRemediation`)
 
 ## Deterministic Order
 
@@ -33,6 +35,7 @@ PR sequence is strictly ordered:
 8. After clean rerun, `greptile-auto-resolve-threads` can resolve bot-only unresolved threads.
 9. `sentry-remediation-agent` (scheduled or manual) can ingest unresolved Sentry issues, normalize findings, and open constrained remediation PRs.
 10. `pr-review-harness` runs on every PR and publishes acceptance checklist + screenshot/video evidence to the PR body/comment.
+11. `claude-remediation-agent` can apply Codex fixes from trusted Claude advisory findings when label `claude-remediate` is present.
 
 ## Current-Head SHA Discipline
 
@@ -62,6 +65,11 @@ Fields:
 
 Normalized findings payload consumed by remediation.
 
+### `claude-findings.json`
+
+Normalized findings payload ingested from trusted PR comments/reviews with provider `claude`.
+The contract uses explicit allowlists (`trustedActorLogins`/`trustedAppIds`) and defaults to empty lists for safe deny-by-default behavior.
+
 ### `browser-evidence-manifest.json`
 
 Validated for UI-impacting changes by `scripts/harness/browser_evidence_verify.py`.
@@ -80,6 +88,7 @@ Produced by `scripts/harness/remediation_runner.py`.
 - `.github/workflows/harness-weekly-metrics.yml`
 - `.github/workflows/sentry-remediation-agent.yml`
 - `.github/workflows/pr-review-harness.yml`
+- `.github/workflows/claude-remediation-agent.yml`
 
 ## Rollout
 
@@ -104,9 +113,47 @@ python3 scripts/harness/risk_policy_gate.py --pr <n> --head-sha <sha> --changed-
 python3 scripts/harness/browser_evidence_verify.py --manifest artifacts/browser-evidence-manifest.json
 python3 scripts/harness/remediation_runner.py --findings artifacts/review-findings.json --head-sha <sha>
 python3 scripts/harness/sentry_findings.py --org <org> --project <project> --query "is:unresolved level:error"
+python3 scripts/harness/claude_feedback_ingest.py --repo <owner/repo> --pr <n> --head-sha <sha> --token-env GITHUB_TOKEN
 python3 scripts/harness/evidence_capture.py --head-sha <sha> --changed-files <file>
 python3 scripts/harness/pr_packet.py --changed-files <file> --risk-report <report> --evidence-manifest <manifest> --head-sha <sha>
 ```
+
+## Claude Feedback Marker Format
+
+Claude comments/reviews are ingested only when they contain:
+
+- marker: `<!-- openfang-claude-feedback -->`
+- fenced JSON block (no heuristic parsing)
+
+Example:
+
+````markdown
+<!-- openfang-claude-feedback -->
+```json
+{
+  "head_sha": "abc1234deadbeef...",
+  "summary": "Claude review summary",
+  "findings": [
+    {
+      "id": "claude-1",
+      "severity": "high",
+      "confidence": 0.88,
+      "path": "crates/openfang-runtime/src/agent_loop.rs",
+      "line": 120,
+      "summary": "Guard misses error path finish",
+      "actionable": true
+    }
+  ]
+}
+```
+````
+
+If `requireHeadShaMatch=true`, stale `head_sha` comments are ignored.
+
+`claude-remediation-agent` remains label-gated (`claude-remediate`) and uses:
+
+- `OPENFANG_CLAUDE_REMEDIATION_CMD`
+- `OPENFANG_CLAUDE_VALIDATION_CMD`
 
 ## Notes
 

@@ -219,6 +219,22 @@ jobs:
             --ui-impact "${{ steps.ui.outputs.ui_impact }}" \
             --playwright-json artifacts/playwright-evidence.json
 
+      - name: Ingest Claude feedback (advisory)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python3 scripts/harness/claude_feedback_ingest.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ needs.resolve-context.outputs.pr_number }}" \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --contract .harness/policy.contract.json \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/claude-findings.json
+          code=$?
+          set -e
+          echo "claude_ingest_exit_code=$code"
+
       - name: Run risk policy gate
         id: gate
         env:
@@ -231,6 +247,7 @@ jobs:
             --changed-files artifacts/context/changed_files.txt \
             --repo "${{ github.repository }}" \
             --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
             --browser-evidence-manifest artifacts/browser-evidence-manifest.json \
             --report-out artifacts/risk-policy-report.json
           code=$?
@@ -277,6 +294,7 @@ jobs:
             artifacts/context/changed_files.txt
             artifacts/risk-policy-report.json
             artifacts/review-findings.json
+            artifacts/claude-findings.json
             artifacts/browser-evidence-manifest.json
             artifacts/playwright-evidence.json
             artifacts/pr-review/evidence/
@@ -308,6 +326,7 @@ jobs:
           changed_file=$(find . -type f -name changed_files.txt | head -1 || true)
           risk_report=$(find . -type f -name risk-policy-report.json | head -1 || true)
           evidence_manifest=$(find . -type f -name browser-evidence-manifest.json | head -1 || true)
+          claude_findings=$(find . -type f -name claude-findings.json | head -1 || true)
           if [ -z "$changed_file" ] || [ -z "$evidence_manifest" ]; then
             echo "required evidence artifacts not found after download"
             exit 1
@@ -315,6 +334,9 @@ jobs:
           cp "$changed_file" artifacts/context/changed_files.txt
           if [ -n "$risk_report" ]; then
             cp "$risk_report" artifacts/risk-policy-report.json
+          fi
+          if [ -n "$claude_findings" ]; then
+            cp "$claude_findings" artifacts/claude-findings.json
           fi
           cp "$evidence_manifest" artifacts/browser-evidence-manifest.json
 
@@ -329,6 +351,7 @@ jobs:
             --contract .harness/policy.contract.json \
             --changed-files artifacts/context/changed_files.txt \
             --risk-report artifacts/risk-policy-report.json \
+            --claude-findings artifacts/claude-findings.json \
             --evidence-manifest artifacts/browser-evidence-manifest.json \
             --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
             --repo "${{ github.repository }}" \
