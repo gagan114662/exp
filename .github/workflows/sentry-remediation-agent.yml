@@ -3,6 +3,10 @@ name: sentry-remediation-agent
 on:
   schedule:
     - cron: '0 */6 * * *'
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sentry-remediation-agent.yml
   workflow_dispatch:
     inputs:
       query:
