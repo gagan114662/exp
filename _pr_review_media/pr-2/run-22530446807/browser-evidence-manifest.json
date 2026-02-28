@@ -1,0 +1,82 @@
+{
+  "artifacts": [
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/01-diff-summary.png",
+      "sha256": "94582967e232698b24857bcadaeacc39b58b57ee9438e3917ff8e9c9d256136d",
+      "size_bytes": 73767
+    },
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/02-verification-summary.png",
+      "sha256": "00e65a2079d72fabf8527718aeac536f9c3c3bbf756ce215b55244fb8d5b7ed5",
+      "size_bytes": 29506
+    },
+    {
+      "kind": "screenshot",
+      "path": "pr-review/evidence/03-checklist-preview.png",
+      "sha256": "1edf4e120af38817c6e87fef6e63cd1c610d4bfdc779c2f5cc6c9d26bfaed745",
+      "size_bytes": 32972
+    },
+    {
+      "kind": "video",
+      "path": "pr-review/evidence/00-implementation-walkthrough.mp4",
+      "sha256": "70d2ae964babc385bea3ea5eef10aaa2af0e0d6497d0ad903325adbcd47056ba",
+      "size_bytes": 119067
+    },
+    {
+      "kind": "report",
+      "path": "risk-policy-report.json",
+      "sha256": "9ac476154705bdf061be93acfa7cc81197b046e4dc62333f1bf00377455f747c",
+      "size_bytes": 2391
+    },
+    {
+      "kind": "log",
+      "path": "context/changed_files.txt",
+      "sha256": "0d96c56dcc4bc1fb9b03aea4e17d835557bfa5bde6213b3bf8dd75cfa0816558",
+      "size_bytes": 797
+    }
+  ],
+  "assertions": [
+    {
+      "details": "Core media generated successfully",
+      "name": "evidence_capture_completed",
+      "status": "pass"
+    },
+    {
+      "details": "Captured 3 screenshots",
+      "name": "screenshots_minimum",
+      "status": "pass"
+    },
+    {
+      "details": "Captured walkthrough video",
+      "name": "videos_minimum",
+      "status": "pass"
+    },
+    {
+      "details": "UI impact not detected",
+      "name": "ui_screenshot_evidence",
+      "status": "pass"
+    },
+    {
+      "details": "UI impact not detected",
+      "name": "ui_video_evidence",
+      "status": "pass"
+    }
+  ],
+  "captured_at": "2026-02-28T22:32:46.664304+00:00",
+  "flows": [
+    "diff-summary-capture",
+    "verification-summary-capture",
+    "checklist-preview-capture",
+    "implementation-walkthrough-video"
+  ],
+  "head_sha": "1016ecd20648d0d7b209e7a407d03455cfb399aa",
+  "summary": {
+    "logs": 1,
+    "reports": 1,
+    "screenshots": 3,
+    "ui_impact": false,
+    "videos": 1
+  }
+}
