@@ -8,6 +8,7 @@ permissions:
   contents: read
   checks: read
   pull-requests: read
+  issues: read
   actions: read
 
 concurrency:
@@ -40,6 +41,23 @@ jobs:
           echo "Changed files:"
           cat changed_files.txt
 
+      - name: Ingest Claude feedback (advisory)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/claude_feedback_ingest.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --contract .harness/policy.contract.json \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/claude-findings.json
+          code=$?
+          set -e
+          echo "claude_ingest_exit_code=$code"
+
       - name: Run risk policy gate
         id: gate
         env:
@@ -53,6 +71,7 @@ jobs:
             --changed-files changed_files.txt \
             --repo "${{ github.repository }}" \
             --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
             --report-out artifacts/risk-policy-report.json
           code=$?
           set -e
@@ -69,6 +88,7 @@ jobs:
           path: |
             artifacts/risk-policy-report.json
             artifacts/review-findings.json
+            artifacts/claude-findings.json
           if-no-files-found: error
 
       - name: Enforce gate status

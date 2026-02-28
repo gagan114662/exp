@@ -27,7 +27,7 @@
     },
     "risk_tier": {
       "type": "string",
-      "enum": ["high", "medium", "low"]
+      "enum": ["critical", "high", "medium", "low"]
     },
     "changed_files": {
       "type": "array",
@@ -80,6 +80,46 @@
     "rollout": {
       "type": "object",
       "additionalProperties": true
+    },
+    "review_states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["provider", "status"],
+        "properties": {
+          "provider": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["success", "failure", "pending", "missing", "timeout", "stale", "error"]
+          },
+          "details": {"type": "string"},
+          "check_run_url": {"type": "string"}
+        }
+      }
+    },
+    "actionable_findings_by_provider": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "advisory_actionable_findings_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "secondary_findings_artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "review_mode": {
+      "type": "string"
+    },
+    "review_primary": {
+      "type": "string"
     }
   }
 }

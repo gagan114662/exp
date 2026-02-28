@@ -7,7 +7,7 @@
     "phases": {
       "phase-0": {
         "description": "Advisory baseline and metrics collection",
-        "enforceMergeBlock": false,
+        "enforceMergeBlock": true,
         "enableRemediation": false
       },
       "phase-1": {
@@ -99,6 +99,7 @@
         ".github/**"
       ],
       "requiredChecks": [
+        "risk-policy-gate",
         "docs-lint"
       ],
       "reviewPolicy": {
@@ -133,6 +134,91 @@
       "cancelled",
       "skipped"
     ]
+  },
+  "reviewPolicy": {
+    "provider": "greptile",
+    "checkRunName": "greptile-review",
+    "timeoutMinutes": 20,
+    "weakConfidenceThreshold": 0.55,
+    "actionableSummaryKeywords": [
+      "fix",
+      "failure",
+      "error",
+      "panic",
+      "unsafe",
+      "leak",
+      "regression"
+    ]
+  },
+  "reviewProviders": {
+    "mode": "alongside",
+    "primary": "greptile",
+    "providers": {
+      "greptile": {
+        "enabled": true,
+        "enforcement": "required",
+        "checkRunName": "greptile-review",
+        "timeoutMinutes": 20,
+        "weakConfidenceThreshold": 0.55,
+        "actionableSummaryKeywords": [
+          "fix",
+          "failure",
+          "error",
+          "panic",
+          "unsafe",
+          "leak",
+          "regression"
+        ]
+      },
+      "claude": {
+        "enabled": true,
+        "enforcement": "advisory",
+        "source": "github_pr_comments",
+        "github": {
+          "trustedActorLogins": [
+            "gagan114662"
+          ],
+          "trustedAppIds": [],
+          "commentMarker": "<!-- openfang-claude-feedback -->",
+          "requireHeadShaMatch": true
+        },
+        "parse": {
+          "format": "json_block",
+          "maxFindings": 200
+        }
+      }
+    }
+  },
+  "automation": {
+    "claudeRemediation": {
+      "enabled": true,
+      "triggerLabel": "claude-remediate",
+      "maxAttemptsPerSha": 1,
+      "applyCommandVar": "OPENFANG_CLAUDE_REMEDIATION_CMD",
+      "validationCommandVar": "OPENFANG_CLAUDE_VALIDATION_CMD"
+    }
+  },
+  "evidencePolicy": {
+    "uiImpactPaths": [
+      "crates/openfang-api/static/**",
+      "crates/openfang-desktop/**",
+      "public/**"
+    ],
+    "requiredFlows": [
+      "diff-summary-capture",
+      "verification-summary-capture",
+      "checklist-preview-capture",
+      "implementation-walkthrough-video"
+    ],
+    "requiredAssertions": []
+  },
+  "prReviewHarness": {
+    "enabled": true,
+    "requiredCheckName": "pr-review-harness",
+    "minScreenshots": 2,
+    "minVideos": 1,
+    "maxFiles": 200,
+    "requiredEvidenceAssertions": []
   },
   "rerunCommentDedupeMarker": "<!-- greptile-rerun-request -->",
   "remediationGuardrails": {

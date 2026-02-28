@@ -1,0 +1,24 @@
+{
+  "errors": [],
+  "findings": [
+    {
+      "actionable": true,
+      "confidence": 0.95,
+      "id": "claude-smoke-2",
+      "line": 1,
+      "path": "docs/harness-engineering.md",
+      "severity": "medium",
+      "summary": "Add one short sentence in Notes that this PR validated Claude advisory ingestion with label-gated remediation."
+    }
+  ],
+  "head_sha": "015eb86e7596271b05d321beac61a9b2d56b5c1d",
+  "ingestion_metrics": {
+    "ignored_stale": 1,
+    "ignored_untrusted": 6,
+    "parse_errors": 0,
+    "parsed_comments": 1,
+    "trusted_comments_seen": 2
+  },
+  "provider": "claude",
+  "status": "success"
+}
