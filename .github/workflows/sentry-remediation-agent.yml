@@ -55,6 +55,11 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sentry-remediation
+
       - name: Collect Sentry findings
         id: collect
         run: |
@@ -182,6 +187,7 @@ jobs:
       - name: Run constrained remediation
         if: ${{ steps.collect.outputs.should_remediate == 'true' }}
         id: remediate
+        timeout-minutes: 12
         run: |
           set +e
 
@@ -199,7 +205,7 @@ jobs:
               "- Do not touch CI/workflows/secrets/config for this task.",
               "- Do not introduce prompt or PII leakage.",
               "- Keep changes limited to files required by findings.",
-              "- Ensure validation command passes.",
+              "- Do not run long test/build commands; CI validation runs in a separate step.",
               "",
               "Actionable findings:",
           ]
@@ -219,16 +225,10 @@ jobs:
           Path(".sentry-findings-context.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 
-          validation_args=()
-          if [ -n "${VALIDATION_CMD:-}" ]; then
-            validation_args+=(--validation-cmd "$VALIDATION_CMD")
-          fi
-
           python3 scripts/harness/remediation_runner.py \
             --findings artifacts/sentry-findings.json \
             --head-sha "$(git rev-parse HEAD)" \
             --apply-cmd "$REMEDIATION_CMD" \
-            "${validation_args[@]}" \
             --attempt-log /tmp/sentry-remediation-attempts.json \
             --result-out artifacts/remediation-result.json
           code=$?
@@ -237,6 +237,14 @@ jobs:
 
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Validate remediation changes
+        if: ${{ steps.collect.outputs.should_remediate == 'true' && steps.remediate.outputs.exit_code == '0' && env.VALIDATION_CMD != '' }}
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          echo "Running post-remediation validation..."
+          timeout 1200 bash -lc "$VALIDATION_CMD"
 
       - name: Write skipped remediation result
         if: ${{ steps.collect.outputs.should_remediate != 'true' }}
