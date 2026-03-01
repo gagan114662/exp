@@ -1,0 +1,1482 @@
+Implement the following plan:
+
+# Plan: Subprocess LLM Drivers for Claude Code + Codex CLI
+
+## Context
+
+OpenFang agents need LLM access, but the user authenticates via **Claude Code OAuth** and **Codex CLI ChatGPT OAuth** — neither token works against standard API endpoints (`api.anthropic.com` rejects OAuth, `api.openai.com` returns "insufficient_quota" for ChatGPT tokens). The solution: spawn the CLI binaries as subprocesses, since both `claude -p` and `codex exec` handle auth internally.
+
+**Verified working:**
+- `claude -p "prompt" --output-format json` → returns JSON with `result`, `usage`, `total_cost_usd`
+- `codex exec "prompt" --json` → returns JSONL with `item.completed` events and `turn.completed` usage
+
+## Changes
+
+### 1. New file: `crates/openfang-runtime/src/drivers/claude_code.rs`
+
+**ClaudeCodeDriver** struct (no fields needed — stateless subprocess spawner):
+
+```rust
+pub struct ClaudeCodeDriver;
+```
+
+**`complete()` implementation:**
+1. Convert `CompletionRequest` messages → single prompt string (role-prefixed lines)
+2. If `request.system` is set, pass `--system-prompt`
+3. Spawn: `claude -p --output-format json --model <request.model>`
+4. Pipe prompt to stdin, read stdout
+5. Parse JSON: extract `result` → `ContentBlock::Text`, `usage.input_tokens` + `usage.output_tokens` → `TokenUsage`
+6. Timeout: 120 seconds
+7. On error: map to `LlmError::Api` or `LlmError::Http`
+
+**No tool use** — CLI doesn't support OpenFang's tool protocol. Return text-only responses.
+**No custom stream impl** — use default (wraps `complete()`).
+
+### 2. New file: `crates/openfang-runtime/src/drivers/codex_cli.rs`
+
+**CodexCliDriver** struct (no fields):
+
+```rust
+pub struct CodexCliDriver;
+```
+
+**`complete()` implementation:**
+1. Convert messages → single prompt string
+2. Spawn: `codex exec --json --model <request.model> "<prompt>"`
+3. Read stdout JSONL, collect all `item.completed` events where `item.type == "agent_message"`
+4. Concatenate text from agent_message items
+5. Parse `turn.completed` event for `usage.input_tokens` + `usage.output_tokens`
+6. Timeout: 120 seconds
+7. Codex has no `--system-prompt` flag — prepend system prompt to the user prompt if present
+
+### 3. Edit: `crates/openfang-runtime/src/drivers/mod.rs`
+
+- Add `pub mod claude_code;` and `pub mod codex_cli;`
+- Add match cases in `create_driver()`:
+  - `"claude-code"` → `Ok(Arc::new(claude_code::ClaudeCodeDriver))`
+  - `"codex"` → `Ok(Arc::new(codex_cli::CodexCliDriver))`
+- No API key required for either (auth handled by CLI)
+
+### 4. Edit: `~/.openfang/config.toml`
+
+Update config to use the new providers:
+
+```toml
+[default_model]
+provider = "codex"
+model = "gpt-4o"
+
+[[fallback_providers]]
+provider = "claude-code"
+model = "sonnet"
+```
+
+### 5. Edit: `crates/openfang-runtime/src/model_catalog.rs`
+
+Update `detect_auth()` to show "claude-code" and "codex" as configured when their binaries are found on PATH (use `which` check).
+
+## Message Serialization
+
+Convert `Vec<Message>` to prompt string:
+```
+[System prompt if present]
+
+User: message text
+Assistant: response text
+User: latest message
+```
+
+For Blocks content, extract text blocks and tool results into readable format.
+
+## Files to Create/Modify
+
+| File | Action |
+|------|--------|
+| `crates/openfang-runtime/src/drivers/claude_code.rs` | **Create** |
+| `crates/openfang-runtime/src/drivers/codex_cli.rs` | **Create** |
+| `crates/openfang-runtime/src/drivers/mod.rs` | **Edit** — add modules + create_driver cases |
+| `crates/openfang-runtime/src/model_catalog.rs` | **Edit** — auth detection |
+| `~/.openfang/config.toml` | **Edit** — switch to codex/claude-code providers |
+
+## Verification
+
+1. `cargo build --workspace --lib` — must compile
+2. `cargo test --workspace` — all tests pass
+3. `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings
+4. Live test: Start daemon, send message to agent, verify response comes through CLI subprocess
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gaganarora/.REDACTED.jsonl
+
+If this plan can be broken down into multiple independent tasks, consider using the TeamCreate tool to create a team and parallelize the work.
+
+---
+
+<task-notification>
+<task-id>bf3bb15</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bf3bb15.output</output-file>
+<status>completed</status>
+<summary>Background command "Test claude with system prompt" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/bf3bb15.output
+
+---
+
+http://127.0.0.1:50051/#agents i wanna see codex cli and  claude code cli here
+
+---
+
+start new session from here for both
+
+---
+
+Build is clean. Here's what I changed:                                        
+
+  crates/openfang-api/static/index_body.html (line ~948-955) — Added two new    
+  options to the agent spawn wizard's provider dropdown:
+  - Claude Code (CLI) → provider value claude-code                              
+  - Codex CLI → provider value codex                                            
+
+  These also already appear automatically in:
+  - Settings > Providers tab — loaded dynamically from /api/providers (already
+  in the catalog)
+  - Setup Wizard — loaded dynamically from /api/providers (shows under "Other
+  providers" since they're not in the "popular" list)
+
+  When you open http://127.0.0.1:50051/#agents and click to spawn a new agent,
+  the provider dropdown in Step 2 will now include "Claude Code (CLI)" and
+  "Codex CLI" at the bottom of the list.
+
+ i meant here
+
+---
+
+<task-notification>
+<task-id>b8721b1</task-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary with new providers" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+[Image: source: REDACTED 2026-02-27 at 6.44.40 PM.png]
+
+---
+
+<task-notification>
+<task-id>b52a235</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b52a235.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b52a235.output
+
+---
+
+fix the model names and have only 2 running claude code and codex
+
+---
+
+[Image: source: REDACTED 2026-02-28 at 9.03.30 AM.png]
+
+---
+
+<task-notification>
+<task-id>bc4a567</task-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+whats the url again to check?
+
+---
+
+[Image: source: REDACTED 2026-02-28 at 9.35.13 AM.png]
+
+---
+
+why is it so slow?
+
+---
+
+[Image: source: REDACTED 2026-02-28 at 9.38.11 AM.png]
+
+---
+
+no thats fine, Here's a full picture of your Sentry setup for **foolish / openfang-monitoring** and what you need to do end-to-end to monitor your agents properly:
+
+---
+
+## ✅ What's Already Configured
+
+**Project:** `openfang-monitoring` (org: `foolish`)
+**DSN:** `https://29483990cf7114c250fd3da1a5ba81d2@o4510958533214208.ingest.us.sentry.io/4510958541668352`
+
+**Environments:** `production` and `integration-test` — both active ✓
+
+**Highlighted Tags** (already set up for agent context):
+`agent_id`, `agent_name`, `agent_type`, `model`, `provider`, `tool_name`, `step_name`, `session_id`, `user_id`
+
+**Highlighted Context** (already mapped):
+- `trace → trace_id`
+- `agent → agent_name, session_id, agent_id`
+- `user → id, email`
+
+**Alert Rules** (5 active):
+1. **Agent API Health Check** — uptime monitor, runs every 1 min
+2. **Send a notification for high p...** — triggered a few seconds ago
+3. **New Agent Issue or Regression** — triggered a few seconds ago
+4. **Agent Unhandled Error Alert** — not yet triggered (waiting)
+5. **Agent High Event Frequency** — triggered 16 minutes ago
+
+**Traces/Spans:** 19 spans collected, actively ingesting data ✓
+**Issues Active:** 3 open — embedding recall failure, agent unresponsive heartbeat, API downtime detected
+
+---
+
+## 🛠 What You Need to Do in Your Agent Code
+
+Your Sentry infrastructure is well-configured. The missing piece is making sure your agent code sends the right data with proper context. Here's the complete instrumentation pattern:
+
+### 1. Install the SDK
+```bash
+pip install sentry-sdk
+```
+
+### 2. Initialize Sentry (once at startup)
+```python
+import sentry_sdk
+
+sentry_sdk.init(
+    dsn="https://29483990cf7114c250fd3da1a5ba81d2@o4510958533214208.ingest.us.sentry.io/4510958541668352",
+    environment="production",          # or "integration-test"
+    traces_sample_rate=1.0,            # capture 100% of transactions
+    profiles_sample_rate=1.0,          # optional: profiling
+    send_default_pii=True,
+)
+```
+
+### 3. Wrap Every Agent Run as a Transaction with the Right Tags
+```python
+import sentry_sdk
+
+def run_agent(agent_id, agent_name, agent_type, model, provider, session_id, user_id):
+    with sentry_sdk.start_transaction(op="agent.run", name=f"Agent: {agent_name}") as tx:
+        # Set tags — these match your highlighted tags in Sentry
+        sentry_sdk.set_tag("agent_id", agent_id)
+        sentry_sdk.set_tag("agent_name", agent_name)
+        sentry_sdk.set_tag("agent_type", agent_type)
+        sentry_sdk.set_tag("model", model)
+        sentry_sdk.set_tag("provider", provider)
+        sentry_sdk.set_tag("session_id", session_id)
+
+        # Set user context
+        sentry_sdk.set_user({"id": user_id, "email": "user@example.com"})
+
+        # Set agent context (maps to your "agent" highlighted context)
+        with sentry_sdk.configure_scope() as scope:
+            scope.set_context("agent", {
+                "agent_name": agent_name,
+                "session_id": session_id,
+                "agent_id": agent_id,
+            })
+
+        try:
+            # Wrap each tool call as a child span
+            with sentry_sdk.start_span(op="agent.tool_call", description="tool_name_here") as span:
+                sentry_sdk.set_tag("tool_name", "tool_name_here")
+                sentry_sdk.set_tag("step_name", "step_1_retrieval")
+                # ... your tool logic here
+
+        except Exception as e:
+            sentry_sdk.capture_exception(e)
+            raise
+```
+
+### 4. Capture Structured Events for Agent Steps
+```python
+# For non-exception events (warnings, tool failures, low-confidence, etc.)
+sentry_sdk.capture_message(
+    "Embedding recall failed, falling back to text search",
+    level="warning",
+    extras={"query": "...", "fallback_reason": "low_score"}
+)
+```
+
+### 5. Heartbeat / Uptime (for the API Health Check alert)
+Your **Agent API Health Check** uptime monitor is pinging `https://api.getfoolish.com/health` every 1 minute. Make sure that endpoint returns HTTP 200 when your agent service is healthy.
+
+---
+
+## 📋 Remaining Gaps to Address
+
+| Gap | Action Needed |
+|---|---|
+| Project platform set to **Rust** | Go to Settings → Projects → openfang-monitoring → General and change Platform to **Python** (or your actual stack) |
+| No `staging` environment | If you need one, add `environment="staging"` in your SDK init for staging deploys |
+| `run_type` tag is defined but not in highlights | Consider adding it to Highlighted Tags if you use it |
+| OTLP traces endpoint available | If you use OpenTelemetry natively, use the OTLP endpoint instead of the Sentry SDK |
+
+---
+
+## 🔑 Quick Reference
+
+| Item | Value |
+|---|---|
+| DSN | `https://29483990cf7114c250fd3da1a5ba81d2@o4510958533214208...` |
+| Org slug | `foolish` |
+| Project | `openfang-monitoring` |
+| Org ID | `4510958533214208` |
+| Project ID | `4510958541668352` |
+
+Your Sentry backend is in great shape — the main action is making sure your agent code initializes with that DSN and tags every run with `agent_id`, `session_id`, `agent_name`, `model`, and `provider` so the highlighted tags and alert rules fire correctly. Want me to tailor the SDK code to a specific agent framework (LangChain, CrewAI, custom, etc.)? is this done?
+
+---
+
+Active issues to resolve:
+
+
+"Embedding recall failed (streaming), falling back to text search" — firing 44s ago, OPENFANG-MONITORING-1. Worth checking if this fallback rate is increasing or steady.
+"Agent is unresponsive" — openfang_kernel::heartbeat is the culprit, OPENFANG-MONITORING-2. This suggests the heartbeat span isn't completing within your expected window.
+"Downtime detected for https://api.getfoolish.com/health" — OPENFANG-MONITORING-3, your uptime monitor flagged the health endpoint as down 2 minutes ago.
+One config note: your project platform is still set to Rust in Sentry's project settings, which is correct — I flagged it as wrong earlier based on my assumption. Leave it as-is.
+Want me to dig into any of those 3 open issues to help you debug them?
+
+---
+
+Here's a breakdown of all 3 active issues in your project (all unresolved, all in the **openfang-monitoring** project):
+
+---
+
+**1. Agent is unresponsive** — `OPENFANG-MONITORING-2`
+- **181 events**, 0 affected users
+- Level: Warning | Escalating
+- The `openfang_kernel::heartbeat` component is failing to get a heartbeat response from an agent
+- Stack trace points to in-app frames in the `openfang` binary, all at `__mh_execute_header`
+- Running on macOS 15.7.2, release 0.1.0, production environment
+
+---
+
+**2. ClawHub browse failed: Network error** — `OPENFANG-MONITORING-1`
+- **3,500 events** (this is where most of your 3.7K error count comes from), 0 affected users
+- Level: Warning | Escalating
+- Full message: *"ClawHub browse failed: error sending request for url `https://clawhub.ai/api/v1/skills?limit=20&sort=trending`"*
+- Your app is trying to reach the ClawHub API but the network request is failing — likely an external service connectivity issue
+
+---
+
+**3. Downtime detected for `https://api.getfoolish.com/health`** — `OPENFANG-MONITORING-3`
+- **1 event**, 0 affected users | Assignee: gagan
+- Level: Error | Status: New
+- **17 minutes of downtime** detected
+- Reason: `dns_error - no record found for Query { name: Name("api.getfoolish.com."), query_type: AAAA, query_class: IN }`
+- Your API's health endpoint is unreachable — the DNS lookup for `api.getfoolish.com` is failing (specifically an IPv6 AAAA record lookup)
+
+---
+
+**TL;DR:** The bulk of your errors (~3.5K) are from the ClawHub API being unreachable. The other two are a dead agent heartbeat and a DNS failure on your own API's health endpoint — that last one in particular looks like something worth investigating urgently.
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me go through the conversation chronologically to capture all important details.
+
+1. **Initial Plan**: User provided a detailed plan for implementing subprocess LLM drivers for Claude Code and Codex CLI in OpenFang (a Rust agent OS with 14 crates).
+
+2. **Implementation Phase**:
+   - Read existing driver code (mod.rs, llm_driver.rs, anthropic.rs, model_catalog.rs) to understand patterns
+   - Created two new driver files: claude_code.rs and codex_cli.rs
+   - Edited mod.rs to add modules, create_driver() cases, known_providers()
+   - Edited model_catalog.rs to add providers and auth detection
+   - Updated config files
+
+3. **First Build Error**: TokenUsage fields are `u64` not `u32` - fixed by removing `as u32` casts
+
+4. **Test Failures**: Provider count tests needed updating (26→28 in mod.rs, 27→29 in model_catalog.rs)
+
+5. **Dashboard Integration**: User wanted to see providers in the dashboard at http://127.0.0.1:50051/#agents
+   - Added options to hardcoded dropdown in index_body.html
+   - Settings/wizard pages load dynamically from /api/providers
+
+6. **Live Testing Issues**:
+   - Codex with `gpt-4o` model fails: "The 'gpt-4o' model is not supported when using Codex with a ChatGPT account"
+   - Codex works without --model flag (uses default GPT-5)
+   - User feedback: "why gpt-4o (for codex)???" - user pointed out the model choice was wrong
+   - Fixed: skip --model flag for common names (gpt-4o, gpt-4o-mini, empty, "default")
+   - Fixed JSONL parser to handle error/turn.failed events
+   - Fixed: Codex uses flat `item.text` field, not `item.content[].text`
+   - Added is_error detection to Claude Code parser
+
+7. **Model Name Display Issue**: User saw "claude-agent" showing `codex:gpt-4o` instead of `claude-code:sonnet`
+   - Root cause: kernel.rs lines 1088-1098 overlays global default_model onto agents without api_key_env/base_url
+   - Fix: Skip overlay for CLI subprocess providers (claude-code, codex)
+   - User asked to have only 2 agents running - deleted all 9 existing agents, spawned fresh "Claude Code" and "Codex CLI"
+
+8. **Sentry Issues Investigation**: User shared 3 active Sentry issues:
+   - OPENFANG-MONITORING-1: ClawHub browse failed (3,500 events) - clawhub.ai is timing out
+   - OPENFANG-MONITORING-2: Agent is unresponsive (181 events) - heartbeat timeout too short for CLI drivers
+   - OPENFANG-MONITORING-3: api.getfoolish.com downtime - DNS doesn't resolve, Sentry UI config issue
+
+9. **Sentry Fixes Applied**:
+   - ClawHub: Downgraded `warn!` to `debug!` for browse/search failures (not install)
+   - Heartbeat: Extended timeout to 300s for CLI subprocess providers
+   - api.getfoolish.com: No code fix needed - Sentry UI config issue
+
+Let me now compile all the details for the summary.
+
+Summary:
+1. Primary Request and Intent:
+   The user requested implementation of subprocess LLM drivers for Claude Code (`claude -p`) and Codex CLI (`codex exec`) in the OpenFang Agent OS (Rust, 14 crates). These drivers spawn CLI binaries as subprocesses to leverage their built-in OAuth authentication, avoiding the need for direct API keys. The user then wanted these providers visible in the dashboard at `http://127.0.0.1:50051/#agents`, wanted only 2 agents running with correct model labels, and finally wanted investigation and fixes for 3 active Sentry issues in the `openfang-monitoring` project.
+
+2. Key Technical Concepts:
+   - OpenFang Agent OS: Rust workspace with 14 crates, Alpine.js dashboard SPA
+   - `LlmDriver` trait: async trait with `complete()` and `stream()` methods
+   - Subprocess spawning via `tokio::process::Command` for CLI-based LLM access
+   - Claude Code CLI: `claude -p --output-format json --model <model>` returns JSON with `result`, `usage`
+   - Codex CLI: `codex exec --json` returns JSONL with `item.completed` and `turn.completed` events
+   - Codex CLI ChatGPT OAuth only supports default model (GPT-5), not `gpt-4o`
+   - `TokenUsage` fields are `u64` (not `u32`) — critical memory note
+   - Kernel model overlay: `kernel.rs` overrides agent provider/model with global `default_model` when `api_key_env` and `base_url` are both None
+   - Dashboard provider dropdown is hardcoded in `static/index_body.html` while settings/wizard load dynamically from `/api/providers`
+   - Sentry integration already fully wired in Rust: transactions, tags, breadcrumbs, spans in `agent_loop.rs` and `kernel.rs`
+   - `sentry-tracing` crate captures `warn!` level logs as Sentry events
+
+3. Files and Code Sections:
+
+   - **`crates/openfang-runtime/src/drivers/claude_code.rs`** (CREATED)
+     - Subprocess driver spawning `claude -p --output-format json`
+     - Passes `--system-prompt` and `--model` flags
+     - Parses JSON response: `result` field for text, `usage.input_tokens`/`usage.output_tokens` for token counts
+     - Checks `is_error` field for error responses
+     - `serialize_messages()` converts `CompletionRequest` messages to role-prefixed text
+     - `is_available()` checks if `claude` binary is on PATH
+     - 7 unit tests
+
+   - **`crates/openfang-runtime/src/drivers/codex_cli.rs`** (CREATED)
+     - Subprocess driver spawning `codex exec --json`
+     - Skips `--model` flag for gpt-4o/gpt-4o-mini/empty/"default" (ChatGPT OAuth limitation)
+     - Prepends system prompt to user prompt (no `--system-prompt` flag)
+     - Parses JSONL: `item.completed` with `item.type == "agent_message"` for text (flat `item.text` field), `turn.completed` for usage
+     - Handles `error` and `turn.failed` events as `LlmError::Api`
+     - 8 unit tests
+
+   - **`crates/openfang-runtime/src/drivers/mod.rs`** (EDITED)
+     - Added `pub mod claude_code;` and `pub mod codex_cli;`
+     - Added match cases in `create_driver()` before Anthropic case:
+       ```rust
+       if provider == "claude-code" {
+           return Ok(Arc::new(claude_code::ClaudeCodeDriver));
+       }
+       if provider == "codex" {
+           return Ok(Arc::new(codex_cli::CodexCliDriver));
+       }
+       ```
+     - Updated `known_providers()`: added "claude-code" and "codex" (26→28)
+     - Updated error message with new provider names
+     - Updated test: `providers.len()` from 26 to 28
+     - Added 2 tests for create_driver with no API key
+
+   - **`crates/openfang-runtime/src/model_catalog.rs`** (EDITED)
+     - Added `has_binary_on_path()` helper using `which`
+     - Added `claude-code` and `codex` to `builtin_providers()` with `key_required: true` and placeholder `api_key_env`
+     - Added auth detection in `detect_auth()`:
+       ```rust
+       "claude-code" => has_binary_on_path("claude"),
+       "codex" => has_binary_on_path("codex"),
+       ```
+     - Updated provider count test: 27→29
+
+   - **`crates/openfang-kernel/src/kernel.rs`** (EDITED)
+     - Lines 1088-1098: Fixed model overlay to skip CLI subprocess providers:
+       ```rust
+       let is_cli_provider = matches!(
+           manifest.model.provider.as_str(),
+           "claude-code" | "codex"
+       );
+       if !is_cli_provider
+           && manifest.model.api_key_env.is_none()
+           && manifest.model.base_url.is_none()
+       {
+           // ... overlay default_model
+       }
+       ```
+
+   - **`crates/openfang-kernel/src/heartbeat.rs`** (EDITED)
+     - Extended heartbeat timeout for CLI subprocess providers to 300s (5 min):
+       ```rust
+       let is_cli_provider = matches!(
+           entry_ref.manifest.model.provider.as_str(),
+           "claude-code" | "codex"
+       );
+       let timeout_secs = if is_cli_provider {
+           base_timeout.max(300)
+       } else {
+           base_timeout
+       } as i64;
+       ```
+
+   - **`crates/openfang-api/src/routes.rs`** (EDITED)
+     - Line 2912: Downgraded ClawHub browse failure from `warn!` to `debug!`
+     - Line 2857: Downgraded ClawHub search failure from `warn!` to `debug!`
+     - Line 3044: Kept ClawHub install failure as `warn!` (user-initiated action)
+
+   - **`crates/openfang-api/static/index_body.html`** (EDITED)
+     - Added to provider dropdown (line ~948):
+       ```html
+       <option value="claude-code">Claude Code (CLI)</option>
+       <option value="codex">Codex CLI</option>
+       ```
+
+   - **`~/.openfang/config.toml`** (EDITED)
+     - Changed default provider from `openai:gpt-4o` to `codex:gpt-4o`
+     - Changed fallback from `anthropic:claude-sonnet-4-5` to `claude-code:sonnet`
+
+   - **`openfang.toml.example`** (EDITED)
+     - Added commented examples for claude-code and codex providers
+
+4. Errors and Fixes:
+   - **TokenUsage `u64` vs `u32`**: Both drivers initially used `as u32` casts. Compiler error E0308. Fixed by removing casts and using `u64` directly.
+   - **Provider count test failures**: Tests hardcoded provider counts (26 in mod.rs, 27 in model_catalog.rs). Fixed by updating to 28 and 29 respectively.
+   - **Codex `gpt-4o` not supported**: `codex exec --model gpt-4o` returns error "The 'gpt-4o' model is not supported when using Codex with a ChatGPT account." User feedback: "why gpt-4o (for codex)???" Fixed by skipping `--model` flag for gpt-4o/gpt-4o-mini/empty/"default".
+   - **Codex JSONL format mismatch**: Real codex output uses flat `item.text` field, not `item.content[].text` array. Also, codex exits with code 0 even on errors — errors are in JSONL events. Fixed parser to check `item.text` first and handle `error`/`turn.failed` event types.
+   - **Agent model label wrong**: "claude-agent" showed `codex:gpt-4o` instead of `claude-code:sonnet`. Root cause: kernel.rs overlay at lines 1088-1098 replaces agent's provider with global default when `api_key_env` is None. Fixed by checking for CLI providers before overlay.
+   - **ClawHub 3,500 Sentry events**: `clawhub.ai` is timing out (connection timeout). The `warn!` log was being captured by sentry-tracing. Fixed by downgrading to `debug!`.
+   - **Heartbeat false positives**: 60s default timeout too short for CLI subprocess drivers (20-30s per call). Fixed by extending to 300s for claude-code/codex providers.
+
+5. Problem Solving:
+   - Implemented full subprocess driver pattern for two CLI tools with proper error handling, timeout (120s), message serialization, and JSON/JSONL parsing
+   - Diagnosed kernel model overlay issue causing wrong labels in dashboard
+   - Diagnosed 3 active Sentry issues: ClawHub external service down (code fix), heartbeat too aggressive for slow drivers (code fix), DNS misconfiguration in Sentry UI (no code fix needed)
+   - All builds pass: `cargo build`, `cargo test` (1800+ tests, 0 failures), `cargo clippy` (zero warnings)
+
+6. All User Messages:
+   - "Implement the following plan: # Plan: Subprocess LLM Drivers for Claude Code + Codex CLI" (detailed implementation plan)
+   - (background task notification about claude test)
+   - (background task notification about claude -p text output test)
+   - (background task notification about claude -p JSON output test)
+   - "start new session from here for both"
+   - "http://127.0.0.1:50051/#agents i wanna see codex cli and claude code cli here"
+   - (screenshot showing dashboard agents page with "GENERATING..." status)
+   - "why gpt-4o (for codex)???"
+   - "fix the model names and have only 2 running claude code and codex" (screenshot showing wrong model label `codex:gpt-4o` on claude-agent)
+   - (background task notification)
+   - "whats the url again to check?"
+   - (screenshot showing 404 error at http://127.0.0.1:50051/agents - missing #)
+   - "why is it so slow?" (screenshot showing Claude Code agent taking long to respond)
+   - "no thats fine, Here's a full picture of your Sentry setup..." (detailed Sentry configuration info)
+   - "Active issues to resolve: Embedding recall failed..., Agent is unresponsive..., Downtime detected..." (3 Sentry issues)
+   - Updated Sentry issues detail: OPENFANG-MONITORING-1 is actually ClawHub (3,500 events), not embedding recall; OPENFANG-MONITORING-2 is heartbeat (181 events); OPENFANG-MONITORING-3 is DNS error for api.getfoolish.com
+
+7. Pending Tasks:
+   - **OPENFANG-MONITORING-3** (api.getfoolish.com downtime): Requires manual fix in Sentry UI — either update the uptime monitor URL, delete the alert rule, or configure DNS for api.getfoolish.com. This is not a code change.
+   - Tests and clippy were running when the summary was requested — need to confirm they pass after the Sentry fixes.
+   - Release binary needs to be rebuilt and daemon restarted to deploy the Sentry fixes.
+
+8. Current Work:
+   Applied fixes for the 3 Sentry issues:
+   - Downgraded ClawHub browse/search `warn!` to `debug!` in `routes.rs` (stops 3,500 events flooding Sentry)
+   - Extended heartbeat timeout to 300s for CLI providers in `heartbeat.rs` (stops 181 false positive events)
+   - Build passed (`cargo build --workspace --lib` OK), tests were running (`cargo test --workspace` — initial results showed all passing, grep for "FAILED" returned nothing). Clippy not yet run after these changes.
+
+9. Optional Next Step:
+   Complete verification of the Sentry fixes: run clippy, rebuild release binary, restart daemon, and confirm the error rates drop in Sentry. The user's last substantive message was the detailed Sentry issue breakdown, and the fixes have been applied but not yet deployed to the running daemon.
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gaganarora/.REDACTED.jsonl
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.
+
+---
+
+Unknown skill: simplify
+
+---
+
+Unknown skill: simplify
+
+---
+
+https://github.com/peteromallet/desloppify worth it to integrate?
+
+---
+
+───────────────┬────────────────────────┬─────────────────────────────┐
+  │     Tool      │        Purpose         │           Install           │
+  ├───────────────┼────────────────────────┼─────────────────────────────┤
+  │ cargo clippy  │ Already using          │ Built-in                    │
+  ├───────────────┼────────────────────────┼─────────────────────────────┤
+  │ cargo-udeps   │ Unused dependencies    │ cargo install cargo-udeps   │
+  ├───────────────┼────────────────────────┼─────────────────────────────┤
+  │ cargo-machete │ Unused deps (fast)     │ cargo install cargo-machete │
+  ├───────────────┼────────────────────────┼─────────────────────────────┤
+  │ cargo-deny    │ License/security audit │ cargo install cargo-deny    │
+  ├───────────────┼────────────────────────┼─────────────────────────────┤
+  │ cargo-bloat   │ Binary size analysis   │ cargo install cargo-bloat   install this i want beatutiful code always
+
+---
+
+[Request interrupted by user]
+
+---
+
+call it /beauty not simlify
+
+---
+
+<task-notification>
+<task-id>b6443e9</task-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Install cargo-deny for license/security audit" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+<task-notification>
+<task-id>b2179de</task-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Install cargo-udeps for unused dependency detection" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+Base directory for this skill: /Users/gaganarora/.claude/skills/beauty
+
+# /beauty — Code Beauty Review
+
+Review your recent changes with three parallel expert agents, apply worthwhile fixes, return a summary.
+
+## How It Works
+
+1. **Capture the diff** — get the real `git diff` of staged + unstaged changes (or last commit if clean)
+2. **Launch 3 parallel review agents** on the diff:
+   - **Reuse Agent** — finds duplicated/hand-rolled logic, recommends existing helpers
+   - **Quality Agent** — catches maintainability issues (redundant state, parameter sprawl, leaky abstractions)
+   - **Efficiency Agent** — flags performance/resource issues (dead code, missed concurrency, hot-path bloat)
+3. **Triage findings** — filter to only worthwhile fixes (skip nitpicks)
+4. **Apply fixes** — implement the accepted improvements
+5. **Summary** — concise report of what changed and why
+
+## Execution Steps
+
+### Step 1: Capture the Diff
+
+Run this to get the working diff:
+
+```bash
+git diff HEAD
+```
+
+If the diff is empty (everything committed), use the last commit:
+
+```bash
+git diff HEAD~1..HEAD
+```
+
+Save the diff text — this is the input for all three agents.
+
+### Step 2: Launch 3 Parallel Review Agents
+
+Use the Task tool to spawn all three agents simultaneously. Each agent receives the full diff and the codebase context.
+
+#### Agent 1: Code Reuse Reviewer
+
+```
+You are a code reuse expert. Review this diff for:
+
+1. **Duplicated logic** — code that reimplements something already in the codebase
+2. **Hand-rolled utilities** — custom implementations of common patterns that existing libraries/helpers already solve
+3. **Copy-paste variants** — near-identical code blocks that should be extracted into shared functions
+
+DIFF:
+{diff}
+
+For each finding, provide:
+- File and line range
+- What's duplicated or hand-rolled
+- Where the existing helper/utility lives (search the codebase)
+- Concrete fix: exact code to replace it with
+
+Only report findings worth fixing. Skip trivial cases (< 3 lines, one-time use).
+```
+
+#### Agent 2: Code Quality Reviewer
+
+```
+You are a code quality expert. Review this diff for maintainability issues:
+
+1. **Redundant state** — variables/fields that can be derived from other state
+2. **Parameter sprawl** — functions taking too many arguments (should use structs/builders)
+3. **Copy-paste variants** — similar code blocks that differ by 1-2 lines
+4. **Leaky abstractions** — implementation details exposed through public interfaces
+5. **Stringly-typed patterns** — strings used where enums/types would be safer
+6. **Dead code paths** — unreachable branches, unused match arms
+
+DIFF:
+{diff}
+
+For each finding, provide:
+- File and line range
+- The specific issue
+- Why it hurts maintainability
+- Concrete fix with exact code
+
+Only report findings worth fixing. Skip style-only issues.
+```
+
+#### Agent 3: Efficiency Reviewer
+
+```
+You are a performance and efficiency expert. Review this diff for:
+
+1. **Redundant/dead code** — computations whose results are never used
+2. **Missed concurrency** — sequential operations that could be parallel
+3. **Hot-path bloat** — expensive operations in frequently-called code paths
+4. **TOCTOU patterns** — check-then-act that should be atomic
+5. **Memory issues** — unnecessary clones, unbounded collections, leaked allocations
+6. **Overly broad operations** — fetching/processing more data than needed
+
+DIFF:
+{diff}
+
+For each finding, provide:
+- File and line range
+- The specific inefficiency
+- Estimated impact (high/medium/low)
+- Concrete fix with exact code
+
+Only report medium+ impact findings. Skip micro-optimizations.
+```
+
+### Step 3: Triage Findings
+
+After all 3 agents return, combine their findings. Apply a fix if it meets ANY of:
+- Removes genuine duplication (> 5 lines saved)
+- Eliminates a real bug risk (TOCTOU, leaky abstraction)
+- Measurable performance improvement on a hot path
+- Significantly improves readability without changing behavior
+
+**Skip** if:
+- Pure style preference
+- Micro-optimization (< 1% impact)
+- Would require large refactor for small benefit
+- Changes public API without clear win
+
+### Step 4: Apply Fixes
+
+For each accepted finding:
+1. Read the target file
+2. Apply the fix using Edit tool
+3. Run `cargo build --workspace --lib` (or equivalent) to verify it compiles
+4. Run `cargo test --workspace` to verify no regressions
+
+### Step 5: Summary
+
+Output a concise summary:
+
+```
+## Beauty Review Summary
+
+**Reviewed:** {N} files changed, {M} additions, {K} deletions
+
+### Applied ({count})
+- [{file}:{line}] {what was fixed} — {why}
+
+### Skipped ({count})
+- [{file}:{line}] {finding} — {why skipped}
+
+### Stats
+- Reuse: {applied}/{total} findings
+- Quality: {applied}/{total} findings
+- Efficiency: {applied}/{total} findings
+```
+
+---
+
+<task-notification>
+<task-id>aba0317</task-id>
+<status>completed</status>
+<summary>Agent "Code quality review agent" completed</summary>
+<result>I now have a thorough understanding of all the relevant code. Here is my complete review.
+
+---
+
+## Maintainability Review: 6 Findings
+
+### Finding 1: Stringly-typed provider names scattered across 4 crates
+
+**Files and line ranges:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/heartbeat.rs` lines 71-73
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/kernel.rs` lines 1092-1094
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/mod.rs` lines 192, 197
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 90-91
+
+**The issue:** The string literals `"claude-code"` and `"codex"` are matched independently in 4 locations across 2 crates (`openfang-kernel` and `openfang-runtime`). Each location reinvents the same `matches!(provider, "claude-code" | "codex")` check. If a third CLI provider is added (e.g., `"aider"`), every site must be found and updated manually. A missed site would silently use incorrect behavior (wrong timeout, wrong overlay logic, wrong auth detection).
+
+**Why it hurts maintainability:** This is a classic shotgun surgery smell. The concept "this is a CLI subprocess provider" is a domain concept that affects heartbeat timeouts, model overlay, driver creation, and auth detection -- but it has no single source of truth. Grep is the only safety net.
+
+**Concrete fix:** Add a predicate to `openfang-types` (which both kernel and runtime depend on) so the set of CLI providers is defined exactly once:
+
+```rust
+// In crates/openfang-types/src/model_catalog.rs (or a new provider.rs)
+
+/// Provider names that represent CLI subprocess providers (auth handled externally).
+pub const CLI_SUBPROCESS_PROVIDERS: &[&str] = &["claude-code", "codex"];
+
+/// Returns true if the given provider name is a CLI subprocess provider.
+pub fn is_cli_subprocess_provider(provider: &str) -> bool {
+    CLI_SUBPROCESS_PROVIDERS.contains(&provider)
+}
+```
+
+Then each call site becomes:
+```rust
+// heartbeat.rs, kernel.rs
+use openfang_types::model_catalog::is_cli_subprocess_provider;
+let is_cli_provider = is_cli_subprocess_provider(manifest.model.provider.as_str());
+```
+
+---
+
+### Finding 2: `which_binary` / `has_binary_on_path` duplicated 4 times
+
+**Files and line ranges:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 179-187
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 230-238
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 36-44
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-hands/src/registry.rs` line 268
+
+**The issue:** Four identical implementations of "check if a binary exists on PATH via `which`". They differ only in name (`which_binary` vs `has_binary_on_path`). This also has a platform portability problem: `which` is not available on all systems (Windows lacks it; `where` is the equivalent there).
+
+**Why it hurts maintainability:** A platform fix (e.g., using `which` crate or `std::process::Command::new(name).arg("--version")`) would need to be applied in 4 places. A bug fix in one is easily missed in the others.
+
+**Concrete fix:** Add a shared utility, for example in `openfang-types` or a shared `openfang-util` crate:
+
+```rust
+// Shared utility (e.g., crates/openfang-types/src/util.rs)
+
+/// Check if a binary is available on the system PATH.
+///
+/// Uses `which` on Unix and `where` on Windows.
+pub fn binary_exists_on_path(name: &str) -> bool {
+    #[cfg(unix)]
+    let check_cmd = "which";
+    #[cfg(windows)]
+    let check_cmd = "where";
+
+    std::process::Command::new(check_cmd)
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+```
+
+---
+
+### Finding 3: `extract_text` copy-pasted between claude_code.rs and codex_cli.rs
+
+**Files and line ranges:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 158-171
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 209-222
+
+**The issue:** These two functions are character-for-character identical. Both extract plain text from a `MessageContent` enum by filtering `Text` and `ToolResult` blocks. The `serialize_messages` (claude_code.rs:139) and `serialize_prompt` (codex_cli.rs:185) functions also share the same structure: iterate messages, format as `Role: text`, join with `\n\n`. The only difference is that `serialize_prompt` also prepends the system prompt with `[System]` prefix, while `serialize_messages` skips it (because `claude -p` has a `--system-prompt` flag).
+
+**Why it hurts maintainability:** If a new `ContentBlock` variant is added (e.g., `ContentBlock::File`), both `extract_text` copies must be updated. Since they are private functions in separate modules, there is no compiler linkage to remind you.
+
+**Concrete fix:** Move `extract_text` to the parent `drivers/mod.rs` (or a shared `drivers::util` module) as a `pub(crate)` function:
+
+```rust
+// In crates/openfang-runtime/src/drivers/mod.rs (or drivers/util.rs)
+
+/// Extract plain text from a `MessageContent`.
+pub(crate) fn extract_message_text(content: &openfang_types::message::MessageContent) -> String {
+    match content {
+        openfang_types::message::MessageContent::Text(s) => s.clone(),
+        openfang_types::message::MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                openfang_types::message::ContentBlock::Text { text } => Some(text.as_str()),
+                openfang_types::message::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+```
+
+---
+
+### Finding 4: Codex JSONL fallback parsing (lines 147-160) is likely dead code
+
+**File:** `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 147-160
+
+**The code in question:**
+```rust
+    // If no structured events found, treat the entire output as plain text
+    if text_parts.is_empty() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            // Try to parse as a single JSON response (fallback)
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(text) = json.get("result").and_then(|v| v.as_str()) {
+                    text_parts.push(text.to_string());
+                } else if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                    text_parts.push(text.to_string());
+                }
+            }
+        }
+    }
+```
+
+**The issue:** This fallback tries to parse the entire stdout as a single JSON object with `result` or `text` keys. However, `codex exec --json` always produces JSONL output (one JSON object per line). When the JSONL loop above (lines 86-145) runs, it already processes every line. If the output contains valid JSON lines, they would be parsed there. If the output is a single JSON blob on one line, the JSONL loop would also parse it (since a single-line string has one `line`). The only way to reach this fallback would be if:
+1. The output contains no `item.completed` events with `agent_message` type, AND
+2. The output contains no `error`/`turn.failed` events, AND
+3. The entire raw output happens to be a single JSON object with a `result` or `text` key
+
+That combination means codex returned a non-JSONL response, which contradicts the `--json` flag being passed. The `"result"` key check looks like it was copied from the Claude Code driver's `parse_claude_json` function (which does have a `result` field).
+
+**Why it hurts maintainability:** Untested dead code creates false confidence. Someone reading this might think there is a known code path for single-JSON responses from codex, when there is not. None of the tests exercise this fallback -- all tests use proper JSONL format.
+
+**Concrete fix:** Either:
+- (a) Remove the fallback entirely and let the empty check at line 164 produce the error, OR
+- (b) If kept for defensive reasons, add a `tracing::warn!` so you would notice if it ever fires in production, plus add a test that exercises it:
+
+```rust
+    if text_parts.is_empty() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                tracing::warn!("codex CLI returned non-JSONL response; using single-JSON fallback");
+                // ... rest of fallback
+            }
+        }
+    }
+```
+
+---
+
+### Finding 5: `SentryTracingMode` fields are structurally redundant
+
+**File:** `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-cli/src/main.rs` lines 709-729
+
+**The code:**
+```rust
+#[derive(Clone, Copy)]
+struct SentryTracingMode {
+    enabled: bool,
+    emit_error_events: bool,
+}
+```
+
+**The issue:** Looking at `load_sentry_tracing_mode` (line 715), `sentry_enabled` is computed as `dsn_configured && (error_tracking || performance_monitoring)`. Meanwhile, `emit_error_events` is set to `config.sentry.error_tracking` directly -- without gating on `enabled`. This means `emit_error_events` can be `true` even when `enabled` is `false`. However, every consumer checks `if sentry_mode.enabled` first (lines 748, 776, 803), meaning `emit_error_events` is only ever read when `enabled` is already `true`. The bool is structurally unnecessary when `enabled` is false but harmless.
+
+The more significant issue is that this represents three possible states with two bools (4 possible combinations):
+
+| `enabled` | `emit_error_events` | Meaning |
+|---|---|---|
+| false | * | Sentry off (error_events ignored) |
+| true | false | Sentry on, breadcrumbs only |
+| true | true | Sentry on, errors promoted to events |
+
+This maps cleanly to an enum with 3 variants, which eliminates the impossible state.
+
+**Concrete fix:**
+
+```rust
+#[derive(Clone, Copy)]
+enum SentryTracingMode {
+    Disabled,
+    BreadcrumbsOnly,
+    WithErrorEvents,
+}
+
+impl SentryTracingMode {
+    fn is_enabled(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    fn emit_error_events(self) -> bool {
+        matches!(self, Self::WithErrorEvents)
+    }
+}
+```
+
+Then `load_sentry_tracing_mode` becomes:
+```rust
+fn load_sentry_tracing_mode(config_path: Option<&PathBuf>) -> SentryTracingMode {
+    let config = load_config(config_path.map(|p| p.as_path()));
+    let dsn_configured = config.sentry.dsn.as_ref().is_some_and(|dsn| !dsn.trim().is_empty());
+    if !dsn_configured || !(config.sentry.error_tracking || config.sentry.performance_monitoring) {
+        return SentryTracingMode::Disabled;
+    }
+    if config.sentry.error_tracking {
+        SentryTracingMode::WithErrorEvents
+    } else {
+        SentryTracingMode::BreadcrumbsOnly
+    }
+}
+```
+
+---
+
+### Finding 6: Tracing init functions have heavy copy-paste branching
+
+**File:** `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-cli/src/main.rs` lines 747-829
+
+**The issue:** `init_tracing_stderr_with_sentry` (lines 747-764) and `init_tracing_file_with_sentry` (lines 767-829) both follow the same pattern:
+1. Check if sentry is enabled
+2. If yes: create sentry layer, build registry with env_filter + fmt_layer + sentry_layer, init
+3. If no: build registry with env_filter + fmt_layer, init
+
+The file variant repeats this pattern **three times** (success case with file writer, error fallback with sink writer, and the non-sentry branch of each). The total is 6 near-identical subscriber init blocks across ~80 lines.
+
+**Why it hurts maintainability:** Any change to subscriber configuration (e.g., adding a new layer, changing the filter logic, or adjusting the sentry event filter) must be replicated in all 6 blocks. The `sentry_event_filter` extraction from line 736 was a good first step, but the subscriber assembly itself is still duplicated.
+
+**Concrete fix:** Extract a helper that builds the optional sentry layer, then use it in both functions:
+
+```rust
+fn maybe_sentry_layer(mode: SentryTracingMode) -> Option<sentry_tracing::SentryLayer> {
+    if !mode.is_enabled() {
+        return None;
+    }
+    let emit = mode.emit_error_events();
+    Some(
+        sentry_tracing::layer()
+            .event_filter(move |metadata| sentry_event_filter(metadata.level(), emit)),
+    )
+}
+
+fn init_tracing_stderr_with_sentry(sentry_mode: SentryTracingMode) {
+    tracing_subscriber::registry()
+        .with(default_env_filter())
+        .with(tracing_subscriber::fmt::layer())
+        .with(maybe_sentry_layer(sentry_mode))
+        .init();
+}
+```
+
+The `.with(Option<Layer>)` pattern works in `tracing-subscriber` -- `None` is a no-op layer. This collapses both the stderr function from 18 lines to 6 and the file function from 60+ lines to roughly 20 (one branch for file-open success vs failure, each calling `.with(maybe_sentry_layer(...))` instead of duplicating the sentry/non-sentry split).
+
+---
+
+## Summary Table
+
+| # | Issue | Severity | Effort |
+|---|-------|----------|--------|
+| 1 | Stringly-typed CLI provider checks in 4 locations | High | Low -- add one predicate + const |
+| 2 | `which_binary` duplicated 4 times across 3 crates | Medium | Low -- extract shared utility |
+| 3 | `extract_text` identical in claude_code.rs and codex_cli.rs | Medium | Low -- move to parent module |
+| 4 | Dead fallback JSON parsing in codex JSONL parser | Low | Low -- remove or add warning log |
+| 5 | `SentryTracingMode` two-bool struct with impossible state | Low | Low -- replace with 3-variant enum |
+| 6 | 6 near-identical subscriber init blocks in main.rs | Medium | Medium -- extract `maybe_sentry_layer` helper, leverage `Option<Layer>` |
+
+Findings 1 and 6 are the most impactful. Finding 1 risks silent bugs when a new CLI provider is added. Finding 6 risks configuration drift across the 6 subscriber init blocks. The other findings are straightforward deduplication that reduce future maintenance cost.</result>
+<usage>total_tokens: 54899
+tool_uses: 22
+duration_ms: 120743</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/aba0317.output
+
+---
+
+<task-notification>
+<task-id>a2c4057</task-id>
+<status>completed</status>
+<summary>Agent "Code reuse review agent" completed</summary>
+<result>I now have a complete picture. Here is my analysis.
+
+---
+
+## Code Reuse Review: 5 Findings
+
+### Finding 1: `extract_text()` is duplicated verbatim across both driver files
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 158-171
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 209-222
+
+**What is duplicated:**
+The two `extract_text(content: &MessageContent) -> String` functions are character-for-character identical. Both do the same match on `MessageContent::Text` vs `MessageContent::Blocks`, filtering `ContentBlock::Text` and `ContentBlock::ToolResult` variants.
+
+**Existing helper that almost fits:**
+`MessageContent::text_content()` already exists in `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-types/src/message.rs` lines 141-153. However, it only extracts `ContentBlock::Text` blocks -- it does NOT extract `ContentBlock::ToolResult`. The hand-rolled `extract_text()` additionally includes tool result content, which is a meaningful behavioral difference for CLI drivers that need the full conversation context.
+
+**Recommendation:**
+Either (a) add a `MessageContent::text_with_tool_results()` method to `openfang-types/src/message.rs` and call it from both drivers, or (b) create a shared `pub(crate) fn extract_text(content: &MessageContent) -> String` in the `drivers/mod.rs` parent module and import it in both driver files. Option (a) is preferred because it centralizes `MessageContent` behavior in the type definition.
+
+**Lines saved:** ~14 lines of code (the full function body is removed from one file, replaced with a one-liner call).
+
+---
+
+### Finding 2: `which_binary()` is implemented four times across three crates
+
+**Files and lines:**
+1. `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 179-187 -- shells out to `which`
+2. `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 230-238 -- shells out to `which`
+3. `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 36-44 -- shells out to `which` (named `has_binary_on_path`)
+4. `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-hands/src/registry.rs` lines 268-286 -- pure Rust PATH traversal (cross-platform)
+
+**What is duplicated:**
+There are two distinct implementations:
+- Implementations 1, 2, and 3 are nearly identical: they shell out to `Command::new("which")`, which is Unix-only and will fail on Windows.
+- Implementation 4 (in `openfang-hands`) is a proper cross-platform implementation that walks `$PATH` and checks for `.exe`/`.cmd`/`.bat` extensions on Windows.
+
+The `which` crate (v8.0.0) already exists in `Cargo.lock` as a transitive dependency but is not used directly by any workspace crate.
+
+**Recommendation:**
+Create a single `pub fn binary_on_path(name: &str) -> bool` utility function in `openfang-types` or a shared utility crate, using either the `which` crate (`which::which(name).is_ok()`) or the cross-platform logic already written in `openfang-hands`. Then replace all four call sites. The `openfang-hands` implementation is already correct for cross-platform; the three `Command::new("which")` versions are broken on Windows.
+
+**Lines saved:** ~30 lines of code across 3 files, plus fixes a Windows portability bug.
+
+---
+
+### Finding 3: `serialize_messages()` / `serialize_prompt()` are near-duplicates
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 139-155 (`serialize_messages`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 185-206 (`serialize_prompt`)
+
+**What is duplicated:**
+The core loop body is identical in both:
+```rust
+for msg in &request.messages {
+    let role_label = match msg.role {
+        Role::System => "System",
+        Role::User => "User",
+        Role::Assistant => "Assistant",
+    };
+    let text = extract_text(&msg.content);
+    if !text.is_empty() {
+        parts.push(format!("{role_label}: {text}"));
+    }
+}
+parts.join("\n\n")
+```
+
+The only difference is that `codex_cli.rs` prepends `[System]\n{system}` from `request.system` before the message loop (because Codex CLI lacks `--system-prompt`), whereas `claude_code.rs` passes `--system-prompt` as a CLI flag and does not include it in the prompt text.
+
+**Recommendation:**
+Extract a shared `serialize_messages_to_prompt(messages: &[Message]) -> String` function in `drivers/mod.rs` that handles the common loop. The Codex driver can prepend its system block before calling the shared function. This eliminates the duplicated role-label matching and message iteration logic.
+
+**Lines saved:** ~12 lines (the shared function is ~10 lines; each caller becomes 1-3 lines).
+
+---
+
+### Finding 4: `~/.codex/auth.json` reading is duplicated between `mod.rs` and `model_catalog.rs`
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/mod.rs` lines 341-357 (`read_codex_cli_token() -> Option<String>`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 18-33 (`has_codex_cli_token() -> bool`)
+
+**What is duplicated:**
+Both functions:
+1. Read `$HOME`
+2. Construct path `~/.codex/auth.json`
+3. Read the file
+4. Parse JSON
+5. Navigate to `.tokens.access_token`
+6. Check if non-empty
+
+The `mod.rs` version returns `Option<String>` (the actual token) while `model_catalog.rs` returns `bool` (just checks existence). One is strictly a superset of the other: `has_codex_cli_token()` is equivalent to `read_codex_cli_token().is_some()`.
+
+**Recommendation:**
+Keep only `read_codex_cli_token() -> Option<String>` (the richer version) in a shared location (e.g., `drivers/mod.rs` made `pub(crate)` or moved to a utility module). Then in `model_catalog.rs`, replace `has_codex_cli_token()` with `super::drivers::read_codex_cli_token().is_some()` (or equivalent import path). Both functions live in the same crate (`openfang-runtime`), so sharing is straightforward.
+
+**Lines saved:** ~16 lines (the entire `has_codex_cli_token` function body is removed).
+
+---
+
+### Finding 5: `matches!(provider, "claude-code" | "codex")` is duplicated in two crates
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/heartbeat.rs` lines 71-74
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/kernel.rs` lines 1092-1095
+
+**What is duplicated:**
+Both locations have:
+```rust
+let is_cli_provider = matches!(
+    <something>.model.provider.as_str(),
+    "claude-code" | "codex"
+);
+```
+
+Currently only 2 call sites exist, both in the same crate (`openfang-kernel`). The pattern is a string literal match, so if a new CLI provider is added (e.g., `"aider"`, `"cursor"`), both must be updated manually.
+
+**Recommendation:**
+Add an `is_cli_subprocess_provider()` method to `ModelConfig` in `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-types/src/agent.rs` (where `ModelConfig` is defined). Currently there is no `impl ModelConfig` block at all, so one would need to be created:
+```rust
+impl ModelConfig {
+    pub fn is_cli_subprocess_provider(&self) -> bool {
+        matches!(self.provider.as_str(), "claude-code" | "codex")
+    }
+}
+```
+
+Both call sites in `openfang-kernel` then become `manifest.model.is_cli_subprocess_provider()`. This is only a marginal improvement (~5 lines saved total), but the real value is single-source-of-truth when new CLI providers are added.
+
+**Lines saved:** ~6 lines, but prevents future divergence bugs.
+
+---
+
+### Finding 6: Sentry tracing layer setup is copy-pasted 3 times in main.rs
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-cli/src/main.rs` lines 748-763 (`init_tracing_stderr_with_sentry`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-cli/src/main.rs` lines 776-799 (file writer branch in `init_tracing_file_with_sentry`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-cli/src/main.rs` lines 802-826 (sink fallback branch in `init_tracing_file_with_sentry`)
+
+**What is duplicated:**
+The pattern repeated 3 times is:
+```rust
+if sentry_mode.enabled {
+    let emit_error_events = sentry_mode.emit_error_events;
+    let sentry_layer = sentry_tracing::layer()
+        .event_filter(move |metadata| sentry_event_filter(metadata.level(), emit_error_events));
+    tracing_subscriber::registry()
+        .with(default_env_filter())
+        .with(<fmt_layer>)           // <-- only this varies
+        .with(sentry_layer)
+        .init();
+    return;
+}
+tracing_subscriber::registry()
+    .with(default_env_filter())
+    .with(<fmt_layer>)               // <-- same layer, no sentry
+    .init();
+```
+
+The 3 instances differ only in the fmt layer configuration: stderr (default), file writer (with `Mutex<File>` + `with_ansi(false)`), or sink writer (with `io::sink` + `LevelFilter::ERROR`). The sentry layer construction and the `if enabled { ... } else { ... }` branching is identical in all three.
+
+**Recommendation:**
+This cannot be trivially extracted into a generic function because `tracing_subscriber` uses a complex type-level layer composition (each `.with()` changes the type). However, you can use a macro or an `Option<Layer>` approach. The idiomatic tracing-subscriber pattern is:
+
+```rust
+fn make_sentry_layer(mode: SentryTracingMode) -> Option<sentry_tracing::SentryLayer> {
+    if mode.enabled {
+        let emit = mode.emit_error_events;
+        Some(sentry_tracing::layer()
+            .event_filter(move |m| sentry_event_filter(m.level(), emit)))
+    } else {
+        None
+    }
+}
+```
+
+Since `Option<L: Layer>` implements `Layer` (it's a no-op when `None`), each init function becomes:
+```rust
+tracing_subscriber::registry()
+    .with(default_env_filter())
+    .with(<fmt_layer>)
+    .with(make_sentry_layer(sentry_mode))
+    .init();
+```
+
+This eliminates the `if/else` branching entirely from all three call sites and removes the sentry layer construction duplication.
+
+**Lines saved:** ~30 lines (the 3 duplicated `if enabled { ... } else { ... }` blocks collapse to single `.with(make_sentry_layer(...))` calls).
+
+---
+
+## Summary Table
+
+| # | Pattern | Locations | Lines Saved | Priority |
+|---|---------|-----------|-------------|----------|
+| 1 | `extract_text()` identical in both drivers | 2 files in `openfang-runtime` | ~14 | Medium |
+| 2 | `which_binary()` / `has_binary_on_path()` 4 implementations, 3 broken on Windows | 3 crates, 4 files | ~30 + bug fix | **High** |
+| 3 | `serialize_messages()` / `serialize_prompt()` near-duplicate | 2 files in `openfang-runtime` | ~12 | Medium |
+| 4 | `~/.codex/auth.json` reading duplicated | 2 files in `openfang-runtime` | ~16 | Medium |
+| 5 | `matches!(provider, "claude-code" \| "codex")` | 2 files in `openfang-kernel` | ~6 | Low (but prevents future bugs) |
+| 6 | Sentry tracing layer setup copy-pasted 3x | 1 file (`main.rs`) | ~30 | Medium |
+
+**Highest-impact fix:** Finding 2 (`which_binary`). It has the most duplication (4 copies across 3 crates), and 3 of the 4 implementations have a real portability bug (they shell out to `which` which does not exist on Windows). The fix consolidates to a single cross-platform implementation.</result>
+<usage>total_tokens: 70626
+tool_uses: 32
+duration_ms: 134440</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/a2c4057.output
+
+---
+
+<task-notification>
+<task-id>ae39bdf</task-id>
+<status>completed</status>
+<summary>Agent "Efficiency review agent" completed</summary>
+<result>Now I have all the information needed. Let me compile the findings.
+
+---
+
+## Performance Review Findings
+
+### Finding 1: `detect_auth()` spawns synchronous subprocesses and performs blocking I/O, called from API request handlers
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 36-44 (`has_binary_on_path`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 18-33 (`has_codex_cli_token`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 78-100 (`detect_auth`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-api/src/routes.rs` lines 5799 and 5854 (callers from API handlers)
+
+**The specific inefficiency:**
+
+`detect_auth()` iterates over all ~28 providers and, for the `claude-code` and `codex` providers, spawns a synchronous `std::process::Command::new("which")` subprocess. For `openai`, it performs a synchronous `std::fs::read_to_string` of `~/.codex/auth.json` followed by JSON parsing. These are blocking operations.
+
+`detect_auth()` is called in three contexts:
+1. Once at kernel boot (line 665 of `kernel.rs`) -- acceptable.
+2. From the `PUT /api/providers/:name/key` handler (routes.rs:5799) -- **on an API request path**.
+3. From the `DELETE /api/providers/:name/key` handler (routes.rs:5854) -- **on an API request path**.
+
+When called from API handlers, the method re-checks **all** providers (not just the one that changed). This means every API key save/delete spawns 2 `which` subprocesses plus 1 filesystem read+parse, all blocking the async runtime thread.
+
+The `which` crate (v8.0.0) is already in the Cargo.lock (used by another dependency), so it could be used as a pure-Rust PATH lookup with zero subprocess overhead.
+
+**Estimated impact: MEDIUM.** The API handlers are infrequent (only when a user saves/removes an API key), so this is not a constant drain. However, spawning synchronous subprocesses on a tokio worker thread blocks that thread, which can cause latency spikes if other tasks are queued on the same worker. Spawning 2 processes that fork the entire daemon just to check PATH is wasteful.
+
+**Concrete fix:**
+- Replace `has_binary_on_path` with `which::which(name).is_ok()` (pure-Rust PATH lookup, no subprocess). The `which` crate is already in the dependency tree.
+- Make `detect_auth()` accept an optional provider filter so that the API handlers only re-check the single provider that was modified, rather than all 28.
+- If the full re-scan is intentional, wrap the blocking calls in `tokio::task::spawn_blocking`.
+
+---
+
+### Finding 2: Duplicate `which_binary` implementation across three files
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 36-44 (`has_binary_on_path`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 179-187 (`which_binary`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 230-238 (`which_binary`)
+
+**The specific inefficiency:**
+
+The exact same subprocess-spawning pattern (`Command::new("which").arg(name)...`) is copy-pasted into three separate files. Each spawns a real OS process. The functions in `claude_code.rs` and `codex_cli.rs` (`is_available()`) are currently dead code -- they are `pub` but have zero callers anywhere in the codebase (confirmed by grep). This means two of the three implementations exist with no purpose, adding code surface area and compile-time cost.
+
+**Estimated impact: MEDIUM.** The duplication itself is a maintenance issue. More importantly, the `is_available()` functions in the driver files are never called, which suggests they were intended for use but never wired in, or are leftover from development. If they get called in the future (e.g., from a health check on a hot path), each call would spawn a subprocess.
+
+**Concrete fix:**
+- Remove the dead `is_available()` and `which_binary()` from both `claude_code.rs` and `codex_cli.rs`.
+- Consolidate binary lookup into a single utility function using the `which` crate, shared across the codebase.
+
+---
+
+### Finding 3: `read_codex_cli_token()` performs uncached filesystem I/O per driver creation for OpenAI, and is duplicated with `has_codex_cli_token()`
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/mod.rs` lines 341-357 (`read_codex_cli_token`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/model_catalog.rs` lines 18-33 (`has_codex_cli_token`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/kernel.rs` line 3686 (`resolve_driver` calling `create_driver`)
+
+**The specific inefficiency:**
+
+`read_codex_cli_token()` reads `~/.codex/auth.json` from disk, parses the JSON, and extracts the token. It is called from `create_driver()` when the provider is `"openai"` and no `OPENAI_API_KEY` env var is set.
+
+`resolve_driver()` calls `create_driver()` for every agent message if the agent uses a non-default provider. If the provider is `openai` and no env var is set, this means **every user message** triggers a synchronous filesystem read + JSON parse.
+
+Additionally, `has_codex_cli_token()` in `model_catalog.rs` performs the identical operation (read the same file, parse the same JSON) but returns `bool` instead of `Option<String>`. These two functions read the same file independently with no caching.
+
+**Estimated impact: MEDIUM.** For the common case where `OPENAI_API_KEY` is set, the `or_else(read_codex_cli_token)` short-circuits and the file is never read. But for users who rely on Codex CLI auth (the intended use case for this feature), every OpenAI-provider message triggers a blocking FS read on the async runtime. The file is small, so it will be in OS page cache, but it is still a synchronous syscall on a tokio worker.
+
+**Concrete fix:**
+- Cache the token in an `OnceLock<Option<String>>` or `LazyLock` so the file is read at most once per process lifetime.
+- Unify `has_codex_cli_token` and `read_codex_cli_token` into a single cached function that returns `Option<String>`, where the bool check is simply `.is_some()`.
+- If the token can be refreshed externally, use a `RwLock<Option<String>>` with a TTL-based re-read (e.g., every 5 minutes).
+
+---
+
+### Finding 4: Subprocess timeout does not kill the child process
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/claude_code.rs` lines 64-67
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-runtime/src/drivers/codex_cli.rs` lines 55-58
+
+**The specific inefficiency:**
+
+Both drivers use `tokio::time::timeout(120s, child.wait_with_output())`. When the timeout fires, the `Elapsed` error is returned and the function exits, but `child.kill()` is never called. The subprocess continues running as an orphan.
+
+The code pattern is:
+```rust
+let output = tokio::time::timeout(
+    std::time::Duration::from_secs(120),
+    child.wait_with_output()
+)
+.await
+.map_err(|_| LlmError::Http("...timed out...".to_string()))?
+```
+
+When the timeout fires, `child` is dropped. For `tokio::process::Child`, dropping does **not** kill the child process -- it detaches it. The tokio documentation explicitly states: "dropping a Child does not kill the child, but rather detaches the child from the current process and may cause it to keep running in the background." This means a hung `claude` or `codex` CLI process will continue consuming resources indefinitely.
+
+**Estimated impact: MEDIUM.** Under normal operation, 120 seconds is generous and timeouts should be rare. But when they do occur (e.g., CLI waiting for interactive auth, network stall), each orphaned process consumes memory and potentially holds file locks. Repeated timeouts could accumulate orphaned processes.
+
+**Concrete fix:**
+Add explicit kill logic when the timeout fires:
+```rust
+let output = match tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await {
+    Ok(result) => result.map_err(|e| LlmError::Http(format!("...process error: {e}")))?,
+    Err(_) => {
+        // Kill the child to avoid orphaned processes
+        let _ = child.kill().await;
+        return Err(LlmError::Http("...timed out after 120s".to_string()));
+    }
+};
+```
+
+Note: Since `child.wait_with_output()` consumes `self`, the kill approach requires restructuring to use `child.kill()` before `wait_with_output()` consumes ownership. The idiomatic approach is to `tokio::pin!` a kill-on-drop wrapper, or to use `child.kill()` + `child.wait()` separately.
+
+---
+
+### Finding 5: `resolve_driver()` creates a new driver on every agent message for non-default providers
+
+**Files and lines:**
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/kernel.rs` lines 3640-3718 (`resolve_driver`)
+- `/Users/gaganarora/Desktop/my projects/open_fang/crates/openfang-kernel/src/kernel.rs` lines 1455, 2047, 2593 (callers per-request)
+
+**The specific inefficiency:**
+
+`resolve_driver()` is called on every agent message dispatch (line 1455), every `send_message` call (line 2047), and every session compaction (line 2593). When the agent uses the same provider as the kernel default, it returns `Arc::clone(&self.default_driver)` (cheap). But when the agent uses a different provider (e.g., `openai` while the kernel default is `groq`), it calls `create_driver()` which:
+1. Allocates a new `DriverConfig` struct
+2. Calls `std::env::var` to read API key env vars
+3. For `openai`, may call `read_codex_cli_token()` (filesystem I/O, as noted in Finding 3)
+4. Allocates a new `Arc<dyn LlmDriver>` with a new HTTP client inside
+
+The drivers (e.g., `OpenAIDriver`) likely contain a `reqwest::Client` which itself holds a connection pool. Recreating it per-request discards the connection pool, forcing new TLS handshakes on every call.
+
+**Estimated impact: MEDIUM-HIGH.** For multi-agent setups where agents use different providers (a core use case), every message creates a new driver with a fresh HTTP connection pool. The TLS handshake overhead alone could add 50-200ms per request. The pattern of creating and immediately discarding `Arc<dyn LlmDriver>` also generates unnecessary allocation churn.
+
+**Concrete fix:**
+- Cache drivers per `(provider, api_key_env, base_url)` tuple in a `HashMap<DriverCacheKey, Arc<dyn LlmDriver>>` on the kernel.
+- Only create a new driver when the cache key is first seen or when the configuration changes.
+- This preserves HTTP connection pools across requests and eliminates the repeated env var lookups and filesystem reads.
+
+---
+
+### Summary of Findings by Impact
+
+| # | Finding | Impact | Location |
+|---|---------|--------|----------|
+| 5 | `resolve_driver()` recreates driver (and HTTP client) per-request for non-default providers | Medium-High | `kernel.rs:3640-3718` |
+| 4 | Subprocess timeout orphans child process (no kill) | Medium | `claude_code.rs:64-67`, `codex_cli.rs:55-58` |
+| 1 | `detect_auth()` spawns blocking subprocesses on API handler paths | Medium | `model_catalog.rs:36-44`, `routes.rs:5799,5854` |
+| 3 | `read_codex_cli_token()` uncached FS I/O per driver creation, duplicated with `has_codex_cli_token()` | Medium | `drivers/mod.rs:341-357`, `model_catalog.rs:18-33` |
+| 2 | `which_binary` triplicated, two copies are dead code | Medium | `claude_code.rs:179-187`, `codex_cli.rs:230-238`, `model_catalog.rs:36-44` |
+
+Items from the review prompt that I evaluated and determined to be **low impact** (not reported per instructions):
+- **`sanitize_sentry_message` double allocation (item 3):** Called only on error paths (LLM failures), with typically short error messages. The double `.chars().collect()` overhead is negligible for strings under 512 chars on an error path.
+- **Sentry metadata `.clone().into()` (item 4):** Called once per agent loop invocation. Three small string clones (`name`, `model`, `provider`) is trivial compared to the LLM network call that follows.
+- **JSONL line-by-line parsing (item 6):** The output of `codex exec` is bounded (single turn response). Line-by-line `serde_json::from_str` is standard practice for JSONL and avoids loading a streaming parser dependency. The overhead is dominated by the subprocess execution itself.
+- **`text_parts.join("")` (item 7):** Typically 1-2 parts. The allocation is negligible.</result>
+<usage>total_tokens: 73111
+tool_uses: 36
+duration_ms: 151542</usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/ae39bdf.output
