@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "7c54e3c1df08",
+  "strategy": "manual-commit",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/openfang-api/static/index_body.html",
+    "crates/openfang-cli/Cargo.toml",
+    "crates/openfang-cli/src/main.rs",
+    "crates/openfang-kernel/src/kernel.rs",
+    "crates/openfang-runtime/src/agent_loop.rs",
+    "crates/openfang-runtime/src/drivers/mod.rs",
+    "crates/openfang-runtime/src/model_catalog.rs",
+    "openfang.toml.example",
+    "scripts/harness/__pycache__/remediation_runner.cpython-314.pyc",
+    "scripts/test_sentry_integration.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7c/54e3c1df08/0/metadata.json",
+      "transcript": "/7c/54e3c1df08/0/full.jsonl",
+      "context": "/7c/54e3c1df08/0/context.md",
+      "content_hash": "/7c/54e3c1df08/0/content_hash.txt",
+      "prompt": "/7c/54e3c1df08/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3,
+    "cache_creation_tokens": 11993,
+    "cache_read_tokens": 19591,
+    "output_tokens": 3,
+    "api_call_count": 1
+  }
+}

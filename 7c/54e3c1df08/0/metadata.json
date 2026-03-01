@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "7c54e3c1df08",
+  "session_id": "2ee63003-f087-413a-b48c-b4f98d6547d3",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-01T19:10:47.344992Z",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/openfang-api/static/index_body.html",
+    "crates/openfang-cli/Cargo.toml",
+    "crates/openfang-cli/src/main.rs",
+    "crates/openfang-kernel/src/kernel.rs",
+    "crates/openfang-runtime/src/agent_loop.rs",
+    "crates/openfang-runtime/src/drivers/mod.rs",
+    "crates/openfang-runtime/src/model_catalog.rs",
+    "openfang.toml.example",
+    "scripts/harness/__pycache__/remediation_runner.cpython-314.pyc",
+    "scripts/test_sentry_integration.sh"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 3,
+    "cache_creation_tokens": 11993,
+    "cache_read_tokens": 19591,
+    "output_tokens": 3,
+    "api_call_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-01T19:07:49.763917Z",
+    "agent_lines": 0,
+    "human_added": 6805,
+    "human_modified": 413,
+    "human_removed": 0,
+    "total_committed": 7217,
+    "agent_percentage": 0
+  }
+}
