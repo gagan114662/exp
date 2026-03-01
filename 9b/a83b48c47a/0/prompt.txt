@@ -1,0 +1,123 @@
+Implement the following plan:
+
+# Fix Sentry 4.5K Error Flood
+
+## Context
+
+The Sentry dashboard at `foolish.sentry.io` shows **4.5K errors** and **2 issues** in the last 24 hours with continuous spikes. Root cause investigation reveals:
+
+1. **Codex CLI auth is broken**: `~/.codex/auth.json` contains `{"auth_mode":"chatgpt","tokens":{}}` — empty tokens. Every `codex exec` call fails with `missing field 'id_token'`.
+2. **13 of 14 running agents use `provider=codex`** — so every LLM request from those agents fails immediately.
+3. **Every failure generates a Sentry error event** via `sentry::capture_message` in `agent_loop.rs:1120` with no rate limiting.
+4. **`traces_sample_rate = 1.0`** (100% sampling) in production amplifies event volume.
+5. **Config corruption**: `~/.openfang/config.toml` has corrupted `sentry.tags` — `oyment = "local"` (truncated key) and duplicate `team = "foolish"`.
+
+## Fixes
+
+### 1. Fix config.toml corruption and reduce sampling
+**File**: `~/.openfang/config.toml`
+- Remove corrupted `oyment = "local"` tag
+- Remove duplicate `team = "foolish"` line
+- Reduce `traces_sample_rate` from `1.0` to `0.2` (20%) — still good observability, 5x fewer trace events
+
+### 2. Add Sentry error rate limiting in agent_loop.rs
+**File**: `crates/openfang-runtime/src/agent_loop.rs`
+- Add a per-error-category rate limiter using a simple `DashMap<String, Instant>` with a 60-second cooldown per category
+- Wrap the `sentry::capture_message` call at line ~1120 (generic LLM errors) and line ~1018 (rate limit errors) with the rate limiter
+- This prevents identical error categories from flooding Sentry — first occurrence sends immediately, subsequent ones within 60s are suppressed (only breadcrumbs are added)
+
+### 3. Re-authenticate Codex CLI (user action)
+- User must run `codex login` to refresh the ChatGPT OAuth tokens
+- This is the actual fix for the error source — without valid tokens, all codex-provider agents will keep failing
+
+### 4. Restart daemon after fixes
+- Rebuild with `cargo build --release -p openfang-cli`
+- Restart daemon to pick up config changes and new rate-limiting code
+
+## Verification
+1. `cargo build --workspace --lib` — compiles
+2. `cargo test --workspace` — tests pass
+3. `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings
+4. After `codex login` + daemon restart: Sentry error rate should drop to near-zero
+5. Check Sentry dashboard after 15 minutes to confirm error volume taper
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/gaganarora/.claude/projects/-Users-gaganarora-Desktop-my-projects-open-fang/d83852c4-25ed-4278-994e-d40b32bf1ee5.jsonl
+
+If this plan can be broken down into multiple independent tasks, consider using the TeamCreate tool to create a team and parallelize the work.
+
+---
+
+<task-notification>
+<task-id>be4921d</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/be4921d.output</output-file>
+<status>completed</status>
+<summary>Background command "Test claude CLI with pipe" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/be4921d.output
+
+---
+
+i have the same display still
+
+---
+
+[Image: source: /var/folders/79/x0hsq2wj3qz0d3k35271zm5w0000gn/T/TemporaryItems/NSIRD_screencaptureui_dOKvOy/Screenshot 2026-02-28 at 7.17.14 PM.png]
+
+---
+
+<task-notification>
+<task-id>b48f05d</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b48f05d.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary with rate limiter" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b48f05d.output
+
+---
+
+what are these errors fix them and update dashboard
+
+---
+
+[Image: source: /var/folders/79/x0hsq2wj3qz0d3k35271zm5w0000gn/T/TemporaryItems/NSIRD_screencaptureui_iYH5wB/Screenshot 2026-03-01 at 11.42.07 AM.png]
+
+---
+
+<task-notification>
+<task-id>ba65dee</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/ba65dee.output</output-file>
+<status>completed</status>
+<summary>Background command "Build release binary" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/ba65dee.output
+
+---
+
+<task-notification>
+<task-id>b7b520c</task-id>
+<output-file>/private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b7b520c.output</output-file>
+<status>failed</status>
+<summary>Background command "Wait for 2 heartbeat cycles and check dedup" failed with exit code 1</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-gaganarora-Desktop-my-projects-open-fang/tasks/b7b520c.output
+
+---
+
+i still see them on the dashboard
+
+---
+
+one hour view
+
+---
+
+[Image: source: /var/folders/79/x0hsq2wj3qz0d3k35271zm5w0000gn/T/TemporaryItems/NSIRD_screencaptureui_zb86TM/Screenshot 2026-03-01 at 12.15.42 PM.png]
+
+---
+
+what are these failures and why are they happening in the first place
+
+---
+
+[Request interrupted by user for tool use]

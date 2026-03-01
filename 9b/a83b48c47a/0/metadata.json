@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "9ba83b48c47a",
+  "session_id": "85fe66f3-86e4-47c7-94f7-e35ff0d525d9",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-01T18:32:11.175326Z",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 8,
+  "files_touched": [
+    ".github/workflows/agent-eval-remediation.yml",
+    ".github/workflows/agent-evals-nightly.yml",
+    ".github/workflows/agent-evals-pr.yml",
+    ".github/workflows/pr-review-harness.yml",
+    ".harness/policy.contract.json",
+    "docs/harness-engineering.md",
+    "scripts/harness/eval_metrics_emit.py"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "371682ae416b",
+  "token_usage": {
+    "input_tokens": 120,
+    "cache_creation_tokens": 210306,
+    "cache_read_tokens": 8024139,
+    "output_tokens": 1267,
+    "api_call_count": 100
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-01T18:30:37.967877Z",
+    "agent_lines": 943,
+    "human_added": 2209,
+    "human_modified": 91,
+    "human_removed": 0,
+    "total_committed": 3243,
+    "agent_percentage": 29.078014184397162
+  }
+}

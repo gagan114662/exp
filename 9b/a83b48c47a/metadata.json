@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "9ba83b48c47a",
+  "strategy": "manual-commit",
+  "branch": "codex/universal-pr-review-harness",
+  "checkpoints_count": 8,
+  "files_touched": [
+    ".github/workflows/agent-eval-remediation.yml",
+    ".github/workflows/agent-evals-nightly.yml",
+    ".github/workflows/agent-evals-pr.yml",
+    ".github/workflows/pr-review-harness.yml",
+    ".harness/policy.contract.json",
+    "docs/harness-engineering.md",
+    "scripts/harness/eval_metrics_emit.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/9b/a83b48c47a/0/metadata.json",
+      "transcript": "/9b/a83b48c47a/0/full.jsonl",
+      "context": "/9b/a83b48c47a/0/context.md",
+      "content_hash": "/9b/a83b48c47a/0/content_hash.txt",
+      "prompt": "/9b/a83b48c47a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 120,
+    "cache_creation_tokens": 210306,
+    "cache_read_tokens": 8024139,
+    "output_tokens": 1267,
+    "api_call_count": 100
+  }
+}
