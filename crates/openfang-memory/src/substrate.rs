@@ -39,7 +39,9 @@ impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> OpenFangResult<Self> {
         let conn = Connection::open(db_path).map_err(|e| OpenFangError::Memory(e.to_string()))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA busy_timeout=5000;",
+        )
             .map_err(|e| OpenFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| OpenFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));

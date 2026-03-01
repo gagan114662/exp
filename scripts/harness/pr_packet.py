@@ -182,6 +182,18 @@ def main() -> int:
         name = str(run.get("name", ""))
         check_runs_by_name.setdefault(name, []).append(run)
 
+    def latest_check(check_name: str) -> Dict[str, Any]:
+        direct = check_runs_by_name.get(check_name, [])
+        if direct:
+            return sorted(direct, key=lambda item: int(item.get("id", 0)), reverse=True)[0]
+        fuzzy: List[Dict[str, Any]] = []
+        for name, runs in check_runs_by_name.items():
+            if check_name in name:
+                fuzzy.extend(runs)
+        if not fuzzy:
+            return {}
+        return sorted(fuzzy, key=lambda item: int(item.get("id", 0)), reverse=True)[0]
+
     greptile_runs = check_runs_by_name.get(greptile_check_name, [])
     greptile_run = (
         sorted(greptile_runs, key=lambda item: int(item.get("id", 0)), reverse=True)[0]
@@ -209,12 +221,11 @@ def main() -> int:
         for check in required_checks:
             if check == required_check_name:
                 continue
-            runs = check_runs_by_name.get(check, [])
-            if not runs:
+            run = latest_check(check)
+            if not run:
                 details.append(f"{check}=missing")
                 failures.append(check)
                 continue
-            run = sorted(runs, key=lambda item: int(item.get("id", 0)), reverse=True)[0]
             status = str(run.get("status", ""))
             conclusion = str(run.get("conclusion", "") or "")
             details.append(f"{check}={status}/{conclusion or 'n/a'}")
@@ -266,6 +277,69 @@ def main() -> int:
             return True, "docs/config files touched in this PR"
         return False, "docs/config criterion active but no matching files found"
 
+    def verify_agent_blocking_evals_pass() -> Tuple[bool, str]:
+        run = latest_check("agent-evals-pr")
+        if not run:
+            return False, "agent-evals-pr check run missing"
+        status = str(run.get("status", ""))
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"agent-evals-pr={status}/{conclusion or 'n/a'}"
+
+    def verify_infra_preflight_pass() -> Tuple[bool, str]:
+        run = latest_check("infra-preflight")
+        if not run:
+            return False, "infra-preflight check run missing"
+        status = str(run.get("status", ""))
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"infra-preflight={status}/{conclusion or 'n/a'}"
+
+    def verify_live_provider_gate_pass() -> Tuple[bool, str]:
+        tier = str(risk_report.get("risk_tier", "unknown")).lower()
+        needs_live = tier in {"critical", "high"} or "agent-evals-live-pr" in required_checks
+        if not needs_live:
+            return True, f"live provider gate not required for tier={tier}"
+        run = latest_check("agent-evals-live-pr")
+        if not run:
+            return False, "agent-evals-live-pr check run missing"
+        status = str(run.get("status", ""))
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"agent-evals-live-pr={status}/{conclusion or 'n/a'}"
+
+    def verify_workflow_resume_integrity_pass() -> Tuple[bool, str]:
+        run = latest_check("agent-evals-pr")
+        if not run:
+            return False, "workflow resume integrity requires agent-evals-pr check"
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"resume-integrity via agent-evals-pr={conclusion or 'n/a'}"
+
+    def verify_namespace_isolation_pass() -> Tuple[bool, str]:
+        run = latest_check("risk-policy-gate")
+        if not run:
+            return False, "risk-policy-gate check run missing"
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success" and decision == "pass"
+        return ok, f"namespace isolation bounded by risk gate decision={decision}, check={conclusion or 'n/a'}"
+
+    def verify_approval_matrix_enforced() -> Tuple[bool, str]:
+        run = latest_check("risk-policy-gate")
+        if not run:
+            return False, "approval matrix enforcement check missing (risk-policy-gate)"
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"approval matrix enforced by risk-policy-gate={conclusion or 'n/a'}"
+
+    def verify_sqlite_concurrency_pass() -> Tuple[bool, str]:
+        run = latest_check("agent-evals-pr")
+        if not run:
+            return False, "sqlite concurrency assertion requires agent-evals-pr check"
+        conclusion = str(run.get("conclusion", "") or "")
+        ok = conclusion.lower() == "success"
+        return ok, f"sqlite concurrency via agent-evals-pr={conclusion or 'n/a'}"
+
     verifier = {
         "diff_scoped_coherent": verify_diff_scope,
         "required_ci_signals_green": verify_required_ci_signals,
@@ -273,6 +347,13 @@ def main() -> int:
         "minimum_screenshots": verify_minimum_screenshots,
         "minimum_videos": verify_minimum_videos,
         "no_harness_policy_violations": verify_policy_state,
+        "agent_blocking_evals_pass": verify_agent_blocking_evals_pass,
+        "infra_preflight_pass": verify_infra_preflight_pass,
+        "workflow_resume_integrity_pass": verify_workflow_resume_integrity_pass,
+        "namespace_isolation_pass": verify_namespace_isolation_pass,
+        "approval_matrix_enforced": verify_approval_matrix_enforced,
+        "sqlite_concurrency_pass": verify_sqlite_concurrency_pass,
+        "live_provider_gate_pass": verify_live_provider_gate_pass,
         "ui_evidence_assertions_pass": verify_ui_evidence_assertions,
         "api_runtime_validation_present": verify_api_runtime_validation,
         "docs_consistency_reviewed": verify_docs_consistency,

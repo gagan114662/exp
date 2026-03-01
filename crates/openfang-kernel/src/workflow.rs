@@ -12,9 +12,10 @@
 
 use chrono::{DateTime, Utc};
 use openfang_types::agent::AgentId;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -150,8 +151,32 @@ pub enum ErrorMode {
 pub enum WorkflowRunState {
     Pending,
     Running,
+    Paused,
     Completed,
     Failed,
+}
+
+impl WorkflowRunState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WorkflowRunState::Pending => "pending",
+            WorkflowRunState::Running => "running",
+            WorkflowRunState::Paused => "paused",
+            WorkflowRunState::Completed => "completed",
+            WorkflowRunState::Failed => "failed",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "pending" => WorkflowRunState::Pending,
+            "running" => WorkflowRunState::Running,
+            "paused" => WorkflowRunState::Paused,
+            "completed" => WorkflowRunState::Completed,
+            "failed" => WorkflowRunState::Failed,
+            _ => WorkflowRunState::Failed,
+        }
+    }
 }
 
 /// A running workflow instance.
@@ -203,6 +228,8 @@ pub struct WorkflowEngine {
     workflows: Arc<RwLock<HashMap<WorkflowId, Workflow>>>,
     /// Active and completed workflow runs.
     runs: Arc<RwLock<HashMap<WorkflowRunId, WorkflowRun>>>,
+    /// Optional persistent store for durable workflow state.
+    store: Option<Arc<Mutex<Connection>>>,
 }
 
 impl WorkflowEngine {
@@ -211,12 +238,290 @@ impl WorkflowEngine {
         Self {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(RwLock::new(HashMap::new())),
+            store: None,
         }
+    }
+
+    /// Create a workflow engine backed by SQLite persistence.
+    pub fn new_persistent(conn: Arc<Mutex<Connection>>) -> Self {
+        let engine = Self {
+            workflows: Arc::new(RwLock::new(HashMap::new())),
+            runs: Arc::new(RwLock::new(HashMap::new())),
+            store: Some(conn),
+        };
+        engine.hydrate_from_store();
+        engine
+    }
+
+    fn hydrate_from_store(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let conn = match store.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to lock workflow store: {e}");
+                return;
+            }
+        };
+
+        let mut workflows = HashMap::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT workflow_json FROM workflow_defs") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for row in rows.flatten() {
+                    match serde_json::from_str::<Workflow>(&row) {
+                        Ok(wf) => {
+                            workflows.insert(wf.id, wf);
+                        }
+                        Err(e) => warn!("Failed to decode persisted workflow def: {e}"),
+                    }
+                }
+            }
+        }
+
+        let mut runs = HashMap::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, workflow_id, workflow_name, input, state, output, error, started_at, completed_at
+             FROM workflow_runs",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let workflow_id: String = row.get(1)?;
+                let workflow_name: String = row.get(2)?;
+                let input: String = row.get(3)?;
+                let state: String = row.get(4)?;
+                let output: Option<String> = row.get(5)?;
+                let error: Option<String> = row.get(6)?;
+                let started_at: String = row.get(7)?;
+                let completed_at: Option<String> = row.get(8)?;
+                Ok((
+                    id,
+                    workflow_id,
+                    workflow_name,
+                    input,
+                    state,
+                    output,
+                    error,
+                    started_at,
+                    completed_at,
+                ))
+            }) {
+                for row in rows.flatten() {
+                    let (
+                        run_id_s,
+                        workflow_id_s,
+                        workflow_name,
+                        input,
+                        state_s,
+                        output,
+                        error,
+                        started_at_s,
+                        completed_at_s,
+                    ) = row;
+                    let Ok(run_id_uuid) = Uuid::parse_str(&run_id_s) else {
+                        continue;
+                    };
+                    let Ok(workflow_id_uuid) = Uuid::parse_str(&workflow_id_s) else {
+                        continue;
+                    };
+                    let started_at = DateTime::parse_from_rfc3339(&started_at_s)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    let completed_at = completed_at_s.and_then(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc))
+                    });
+                    runs.insert(
+                        WorkflowRunId(run_id_uuid),
+                        WorkflowRun {
+                            id: WorkflowRunId(run_id_uuid),
+                            workflow_id: WorkflowId(workflow_id_uuid),
+                            workflow_name,
+                            input,
+                            state: WorkflowRunState::from_str(&state_s),
+                            step_results: Vec::new(),
+                            output,
+                            error,
+                            started_at,
+                            completed_at,
+                        },
+                    );
+                }
+            }
+        }
+
+        for (run_id, run) in &mut runs {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT step_name, agent_id, agent_name, output, input_tokens, output_tokens, duration_ms
+                 FROM workflow_step_runs WHERE run_id = ?1 ORDER BY step_index ASC",
+            ) {
+                let key = run_id.to_string();
+                if let Ok(rows) = stmt.query_map(params![key], |row| {
+                    Ok(StepResult {
+                        step_name: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        agent_name: row.get(2)?,
+                        output: row.get(3)?,
+                        input_tokens: row.get::<_, i64>(4)? as u64,
+                        output_tokens: row.get::<_, i64>(5)? as u64,
+                        duration_ms: row.get::<_, i64>(6)? as u64,
+                    })
+                }) {
+                    run.step_results = rows.flatten().collect();
+                }
+            }
+        }
+
+        if let Ok(mut lock) = self.workflows.try_write() {
+            *lock = workflows;
+        }
+        if let Ok(mut lock) = self.runs.try_write() {
+            *lock = runs;
+        }
+    }
+
+    fn persist_workflow_def(&self, workflow: &Workflow) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Ok(conn) = store.lock() else {
+            return;
+        };
+        let workflow_json = match serde_json::to_string(workflow) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to serialize workflow for persistence: {e}");
+                return;
+            }
+        };
+        if let Err(e) = conn.execute(
+            "INSERT INTO workflow_defs (id, name, workflow_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               workflow_json = excluded.workflow_json,
+               updated_at = excluded.updated_at",
+            params![
+                workflow.id.to_string(),
+                workflow.name,
+                workflow_json,
+                workflow.created_at.to_rfc3339(),
+                Utc::now().to_rfc3339()
+            ],
+        ) {
+            warn!("Failed to persist workflow definition: {e}");
+        }
+    }
+
+    fn persist_run(&self, run: &WorkflowRun) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Ok(conn) = store.lock() else {
+            return;
+        };
+        let _ = conn.execute(
+            "INSERT INTO workflow_runs (
+               id, workflow_id, workflow_name, input, state, output, error, started_at, completed_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+               state = excluded.state,
+               output = excluded.output,
+               error = excluded.error,
+               completed_at = excluded.completed_at,
+               updated_at = excluded.updated_at",
+            params![
+                run.id.to_string(),
+                run.workflow_id.to_string(),
+                run.workflow_name,
+                run.input,
+                run.state.as_str(),
+                run.output,
+                run.error,
+                run.started_at.to_rfc3339(),
+                run.completed_at.map(|d| d.to_rfc3339()),
+                Utc::now().to_rfc3339(),
+            ],
+        );
+    }
+
+    fn persist_step_result(&self, run_id: WorkflowRunId, step_index: usize, result: &StepResult) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Ok(conn) = store.lock() else {
+            return;
+        };
+        let _ = conn.execute(
+            "INSERT INTO workflow_step_runs (
+               run_id, step_index, step_name, agent_id, agent_name, output, input_tokens, output_tokens, duration_ms, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(run_id, step_index) DO UPDATE SET
+               output = excluded.output,
+               input_tokens = excluded.input_tokens,
+               output_tokens = excluded.output_tokens,
+               duration_ms = excluded.duration_ms",
+            params![
+                run_id.to_string(),
+                step_index as i64,
+                result.step_name,
+                result.agent_id,
+                result.agent_name,
+                result.output,
+                result.input_tokens as i64,
+                result.output_tokens as i64,
+                result.duration_ms as i64,
+                Utc::now().to_rfc3339(),
+            ],
+        );
+        let _ = conn.execute(
+            "INSERT INTO workflow_resume_cursor (run_id, next_step_index, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET
+               next_step_index = excluded.next_step_index,
+               updated_at = excluded.updated_at",
+            params![
+                run_id.to_string(),
+                (step_index + 1) as i64,
+                Utc::now().to_rfc3339()
+            ],
+        );
+    }
+
+    fn load_resume_cursor(&self, run_id: WorkflowRunId) -> usize {
+        let Some(store) = &self.store else {
+            return 0;
+        };
+        let Ok(conn) = store.lock() else {
+            return 0;
+        };
+        conn.query_row(
+            "SELECT next_step_index FROM workflow_resume_cursor WHERE run_id = ?1",
+            params![run_id.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| v.max(0) as usize)
+        .unwrap_or(0)
+    }
+
+    fn set_run_state(&self, run_id: WorkflowRunId, state: WorkflowRunState) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let Ok(conn) = store.lock() else {
+            return;
+        };
+        let _ = conn.execute(
+            "UPDATE workflow_runs SET state = ?2, updated_at = ?3 WHERE id = ?1",
+            params![run_id.to_string(), state.as_str(), Utc::now().to_rfc3339()],
+        );
     }
 
     /// Register a new workflow definition.
     pub async fn register(&self, workflow: Workflow) -> WorkflowId {
         let id = workflow.id;
+        self.persist_workflow_def(&workflow);
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
@@ -234,7 +539,18 @@ impl WorkflowEngine {
 
     /// Remove a workflow definition.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
-        self.workflows.write().await.remove(&id).is_some()
+        let removed = self.workflows.write().await.remove(&id).is_some();
+        if removed {
+            if let Some(store) = &self.store {
+                if let Ok(conn) = store.lock() {
+                    let _ = conn.execute(
+                        "DELETE FROM workflow_defs WHERE id = ?1",
+                        params![id.to_string()],
+                    );
+                }
+            }
+        }
+        removed
     }
 
     /// Maximum number of retained workflow runs. Oldest completed/failed
@@ -268,6 +584,21 @@ impl WorkflowEngine {
 
         let mut runs = self.runs.write().await;
         runs.insert(run_id, run);
+        if let Some(r) = runs.get(&run_id) {
+            self.persist_run(r);
+            if let Some(store) = &self.store {
+                if let Ok(conn) = store.lock() {
+                    let _ = conn.execute(
+                        "INSERT INTO workflow_resume_cursor (run_id, next_step_index, updated_at)
+                         VALUES (?1, 0, ?2)
+                         ON CONFLICT(run_id) DO UPDATE SET
+                           next_step_index = excluded.next_step_index,
+                           updated_at = excluded.updated_at",
+                        params![run_id.to_string(), Utc::now().to_rfc3339()],
+                    );
+                }
+            }
+        }
 
         // Evict oldest completed/failed runs when we exceed the cap
         if runs.len() > Self::MAX_RETAINED_RUNS {
@@ -312,6 +643,7 @@ impl WorkflowEngine {
                         "pending" => matches!(r.state, WorkflowRunState::Pending),
                         "running" => matches!(r.state, WorkflowRunState::Running),
                         "completed" => matches!(r.state, WorkflowRunState::Completed),
+                        "paused" => matches!(r.state, WorkflowRunState::Paused),
                         "failed" => matches!(r.state, WorkflowRunState::Failed),
                         _ => true,
                     })
@@ -319,6 +651,63 @@ impl WorkflowEngine {
             })
             .cloned()
             .collect()
+    }
+
+    /// Pause a running workflow run.
+    pub async fn pause_run(&self, run_id: WorkflowRunId) -> Result<(), String> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(&run_id)
+            .ok_or_else(|| "Workflow run not found".to_string())?;
+        if matches!(
+            run.state,
+            WorkflowRunState::Completed | WorkflowRunState::Failed
+        ) {
+            return Err("Cannot pause completed/failed workflow run".to_string());
+        }
+        run.state = WorkflowRunState::Paused;
+        self.persist_run(run);
+        self.set_run_state(run_id, WorkflowRunState::Paused);
+        Ok(())
+    }
+
+    /// Return the next step index for a paused/running run and mark it running.
+    pub async fn resume_run(&self, run_id: WorkflowRunId) -> Result<usize, String> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(&run_id)
+            .ok_or_else(|| "Workflow run not found".to_string())?;
+        if matches!(
+            run.state,
+            WorkflowRunState::Completed | WorkflowRunState::Failed
+        ) {
+            return Err("Cannot resume completed/failed workflow run".to_string());
+        }
+        run.state = WorkflowRunState::Running;
+        self.persist_run(run);
+        self.set_run_state(run_id, WorkflowRunState::Running);
+        Ok(self.load_resume_cursor(run_id))
+    }
+
+    /// Find stale running runs and mark them paused for resume.
+    pub async fn recover_stalled_runs(&self, stale_after_secs: u64) -> Vec<WorkflowRunId> {
+        let now = Utc::now();
+        let stale: Vec<WorkflowRunId> = self
+            .runs
+            .read()
+            .await
+            .values()
+            .filter(|r| {
+                matches!(r.state, WorkflowRunState::Running)
+                    && (now - r.started_at).num_seconds() >= stale_after_secs as i64
+            })
+            .map(|r| r.id)
+            .collect();
+
+        for run_id in &stale {
+            let _ = self.pause_run(*run_id).await;
+        }
+        stale
     }
 
     /// Replace `{{var_name}}` references in a template with stored variable values.
@@ -424,10 +813,15 @@ impl WorkflowEngine {
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>>,
     {
         // Get the run and workflow
-        let (workflow, input) = {
+        let (workflow, input, prior_results, prior_output) = {
             let mut runs = self.runs.write().await;
             let run = runs.get_mut(&run_id).ok_or("Workflow run not found")?;
+            if matches!(run.state, WorkflowRunState::Completed) {
+                return Ok(run.output.clone().unwrap_or_default());
+            }
             run.state = WorkflowRunState::Running;
+            self.persist_run(run);
+            self.set_run_state(run_id, WorkflowRunState::Running);
 
             let workflow = self
                 .workflows
@@ -437,7 +831,12 @@ impl WorkflowEngine {
                 .ok_or("Workflow definition not found")?
                 .clone();
 
-            (workflow, run.input.clone())
+            (
+                workflow,
+                run.input.clone(),
+                run.step_results.clone(),
+                run.output.clone(),
+            )
         };
 
         info!(
@@ -447,12 +846,36 @@ impl WorkflowEngine {
             "Starting workflow execution"
         );
 
-        let mut current_input = input;
+        if let Some(output) = prior_output {
+            return Ok(output);
+        }
+
+        let mut current_input = input.clone();
         let mut all_outputs: Vec<String> = Vec::new();
         let mut variables: HashMap<String, String> = HashMap::new();
-        let mut i = 0;
+        let mut i = self.load_resume_cursor(run_id);
+
+        if !prior_results.is_empty() {
+            if let Some(last) = prior_results.last() {
+                current_input = last.output.clone();
+            }
+            all_outputs.extend(prior_results.iter().map(|r| r.output.clone()));
+            for (idx, result) in prior_results.iter().enumerate() {
+                if let Some(step) = workflow.steps.get(idx) {
+                    if let Some(var) = &step.output_var {
+                        variables.insert(var.clone(), result.output.clone());
+                    }
+                }
+            }
+        }
 
         while i < workflow.steps.len() {
+            if let Some(r) = self.runs.read().await.get(&run_id) {
+                if matches!(r.state, WorkflowRunState::Paused) {
+                    info!(run_id = %run_id, "Workflow execution paused");
+                    return Err("Workflow paused".to_string());
+                }
+            }
             let step = &workflow.steps[i];
 
             debug!(
@@ -487,7 +910,10 @@ impl WorkflowEngine {
                                 duration_ms,
                             };
                             if let Some(r) = self.runs.write().await.get_mut(&run_id) {
-                                r.step_results.push(step_result);
+                                let persisted_index = r.step_results.len();
+                                r.step_results.push(step_result.clone());
+                                self.persist_step_result(run_id, persisted_index, &step_result);
+                                self.persist_run(r);
                             }
 
                             if let Some(ref var) = step.output_var {
@@ -507,6 +933,7 @@ impl WorkflowEngine {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
+                                self.persist_run(r);
                             }
                             return Err(e);
                         }
@@ -569,7 +996,10 @@ impl WorkflowEngine {
                                     duration_ms,
                                 };
                                 if let Some(r) = self.runs.write().await.get_mut(&run_id) {
-                                    r.step_results.push(step_result);
+                                    let persisted_index = r.step_results.len();
+                                    r.step_results.push(step_result.clone());
+                                    self.persist_step_result(run_id, persisted_index, &step_result);
+                                    self.persist_run(r);
                                 }
                                 if let Some(ref var) = fan_step.output_var {
                                     variables.insert(var.clone(), output.clone());
@@ -585,6 +1015,7 @@ impl WorkflowEngine {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
+                                    self.persist_run(r);
                                 }
                                 return Err(error_msg);
                             }
@@ -598,6 +1029,7 @@ impl WorkflowEngine {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
+                                    self.persist_run(r);
                                 }
                                 return Err(error_msg);
                             }
@@ -663,7 +1095,10 @@ impl WorkflowEngine {
                                 duration_ms,
                             };
                             if let Some(r) = self.runs.write().await.get_mut(&run_id) {
-                                r.step_results.push(step_result);
+                                let persisted_index = r.step_results.len();
+                                r.step_results.push(step_result.clone());
+                                self.persist_step_result(run_id, persisted_index, &step_result);
+                                self.persist_run(r);
                             }
                             if let Some(ref var) = step.output_var {
                                 variables.insert(var.clone(), output.clone());
@@ -677,6 +1112,7 @@ impl WorkflowEngine {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
+                                self.persist_run(r);
                             }
                             return Err(e);
                         }
@@ -721,7 +1157,10 @@ impl WorkflowEngine {
                                     duration_ms,
                                 };
                                 if let Some(r) = self.runs.write().await.get_mut(&run_id) {
-                                    r.step_results.push(step_result);
+                                    let persisted_index = r.step_results.len();
+                                    r.step_results.push(step_result.clone());
+                                    self.persist_step_result(run_id, persisted_index, &step_result);
+                                    self.persist_run(r);
                                 }
 
                                 current_input = output.clone();
@@ -750,6 +1189,7 @@ impl WorkflowEngine {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
+                                    self.persist_run(r);
                                 }
                                 return Err(e);
                             }
@@ -772,6 +1212,7 @@ impl WorkflowEngine {
             r.state = WorkflowRunState::Completed;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
+            self.persist_run(r);
         }
 
         info!(run_id = %run_id, "Workflow completed successfully");

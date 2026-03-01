@@ -31,6 +31,36 @@
       "id": "no_harness_policy_violations",
       "title": "No harness policy violations",
       "description": "Risk/policy gate decision is in an allowed pass state."
+    },
+    {
+      "id": "agent_blocking_evals_pass",
+      "title": "Agent blocking evals pass",
+      "description": "Deterministic blocking agent eval suite completed and passed for required risk tiers."
+    },
+    {
+      "id": "infra_preflight_pass",
+      "title": "Infrastructure preflight passes",
+      "description": "Workflow preflight checks for secrets, connectivity, tooling, and GitHub API access are healthy."
+    },
+    {
+      "id": "workflow_resume_integrity_pass",
+      "title": "Workflow resume integrity passes",
+      "description": "Durable workflow engine preserves cursor state and resumes without replaying completed steps."
+    },
+    {
+      "id": "namespace_isolation_pass",
+      "title": "Namespace isolation passes",
+      "description": "Core persistence paths enforce namespace boundaries and prevent cross-namespace leaks."
+    },
+    {
+      "id": "approval_matrix_enforced",
+      "title": "Approval matrix is enforced",
+      "description": "High-risk action classes are blocked unless approval requirements are satisfied."
+    },
+    {
+      "id": "sqlite_concurrency_pass",
+      "title": "SQLite concurrency guardrails pass",
+      "description": "Busy lock handling and concurrency behavior remain within the expected reliability envelope."
     }
   ],
   "path_rules": [
@@ -54,7 +84,8 @@
         "crates/openfang-types/**"
       ],
       "criteria": [
-        "api_runtime_validation_present"
+        "api_runtime_validation_present",
+        "live_provider_gate_pass"
       ]
     },
     {
@@ -76,6 +107,13 @@
     "minimum_screenshots": "verify_minimum_screenshots",
     "minimum_videos": "verify_minimum_videos",
     "no_harness_policy_violations": "verify_policy_state",
+    "agent_blocking_evals_pass": "verify_agent_blocking_evals_pass",
+    "infra_preflight_pass": "verify_infra_preflight_pass",
+    "workflow_resume_integrity_pass": "verify_workflow_resume_integrity_pass",
+    "namespace_isolation_pass": "verify_namespace_isolation_pass",
+    "approval_matrix_enforced": "verify_approval_matrix_enforced",
+    "sqlite_concurrency_pass": "verify_sqlite_concurrency_pass",
+    "live_provider_gate_pass": "verify_live_provider_gate_pass",
     "ui_evidence_assertions_pass": "verify_ui_evidence_assertions",
     "api_runtime_validation_present": "verify_api_runtime_validation",
     "docs_consistency_reviewed": "verify_docs_consistency"

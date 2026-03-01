@@ -11,6 +11,7 @@ use openfang_skills::registry::SkillRegistry;
 use openfang_types::agent::ModelRoutingConfig;
 use openfang_types::taint::{TaintLabel, TaintSink, TaintedValue};
 use openfang_types::tool::{ToolDefinition, ToolResult};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,6 +77,49 @@ fn check_taint_net_fetch(url: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Tools that can cause side effects and should be idempotency-guarded.
+fn is_mutating_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "file_write"
+            | "apply_patch"
+            | "shell_exec"
+            | "agent_spawn"
+            | "agent_kill"
+            | "memory_store"
+            | "task_post"
+            | "task_claim"
+            | "task_complete"
+            | "event_publish"
+            | "schedule_create"
+            | "schedule_delete"
+            | "knowledge_add_entity"
+            | "knowledge_add_relation"
+            | "docker_exec"
+            | "cron_create"
+            | "cron_cancel"
+            | "process_start"
+            | "process_write"
+            | "process_kill"
+    )
+}
+
+fn canonical_input_json(input: &serde_json::Value) -> String {
+    let mut canonical = input.clone();
+    if let Some(obj) = canonical.as_object_mut() {
+        obj.remove("_workflow_run_id");
+        obj.remove("_workflow_step_index");
+        obj.remove("_idempotency_key");
+    }
+    serde_json::to_string(&canonical).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 tokio::task_local! {
@@ -169,6 +213,45 @@ pub async fn execute_tool(
                     };
                 }
             }
+        }
+    }
+
+    let mut idempotency_guard: Option<String> = None;
+    if let Some(kh) = kernel {
+        if is_mutating_tool(tool_name) {
+            let canonical_input = canonical_input_json(input);
+            let input_hash = sha256_hex(&canonical_input);
+            let run_id = input
+                .get("_workflow_run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
+            let step_index = input
+                .get("_workflow_step_index")
+                .and_then(|v| v.as_i64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string());
+
+            let computed_key = sha256_hex(&format!(
+                "{run_id}:{step_index}:{tool_name}:{canonical_input}"
+            ));
+            let key = input
+                .get("_idempotency_key")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+                .unwrap_or(computed_key);
+
+            match kh.tool_effect_get(&key) {
+                Ok(Some(cached)) => {
+                    debug!(tool_name, key = %key, "Idempotency cache hit");
+                    return cached;
+                }
+                Ok(None) => {}
+                Err(e) => warn!(tool_name, error = %e, "Tool idempotency cache read failed"),
+            }
+            if let Err(e) = kh.tool_effect_start(&key, tool_name, &input_hash) {
+                warn!(tool_name, error = %e, "Tool idempotency start failed");
+            }
+            idempotency_guard = Some(key);
         }
     }
 
@@ -462,7 +545,7 @@ pub async fn execute_tool(
         }
     };
 
-    match result {
+    let final_result = match result {
         Ok(content) => ToolResult {
             tool_use_id: tool_use_id.to_string(),
             content,
@@ -473,7 +556,19 @@ pub async fn execute_tool(
             content: format!("Error: {err}"),
             is_error: true,
         },
+    };
+
+    if let (Some(key), Some(kh)) = (idempotency_guard, kernel) {
+        let output_hash = sha256_hex(&format!(
+            "{}:{}:{}",
+            final_result.tool_use_id, final_result.content, final_result.is_error
+        ));
+        if let Err(e) = kh.tool_effect_finish(&key, &output_hash, &final_result) {
+            warn!(tool_name, error = %e, "Tool idempotency finish failed");
+        }
     }
+
+    final_result
 }
 
 /// Get definitions for all built-in tools.

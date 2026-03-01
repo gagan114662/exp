@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 10;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -37,6 +37,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 7 {
         migrate_v7(conn)?;
+    }
+
+    if current_version < 8 {
+        migrate_v8(conn)?;
+    }
+
+    if current_version < 9 {
+        migrate_v9(conn)?;
+    }
+
+    if current_version < 10 {
+        migrate_v10(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -294,6 +306,123 @@ fn migrate_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (7, datetime('now'), 'Add paired_devices table for device pairing');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 8: Durable workflow definitions, runs, and step cursors.
+fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS workflow_defs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            workflow_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_defs_name ON workflow_defs(name);
+
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            workflow_name TEXT NOT NULL,
+            input TEXT NOT NULL,
+            state TEXT NOT NULL,
+            output TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_state ON workflow_runs(state);
+        CREATE INDEX IF NOT EXISTS idx_workflow_runs_updated_at ON workflow_runs(updated_at);
+
+        CREATE TABLE IF NOT EXISTS workflow_step_runs (
+            run_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            step_name TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            output TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, step_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_step_runs_run_id ON workflow_step_runs(run_id);
+
+        CREATE TABLE IF NOT EXISTS workflow_resume_cursor (
+            run_id TEXT PRIMARY KEY,
+            next_step_index INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (8, datetime('now'), 'Add durable workflow definitions/runs/cursors');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 9: Tool effect idempotency log.
+fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS tool_effect_log (
+            idempotency_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            output_hash TEXT,
+            output_json TEXT,
+            error_text TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_effect_status ON tool_effect_log(status);
+        CREATE INDEX IF NOT EXISTS idx_tool_effect_tool_name ON tool_effect_log(tool_name);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (9, datetime('now'), 'Add tool effect idempotency log');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 10: Add namespace_id columns for stronger isolation boundaries.
+fn migrate_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let add_default_text_col = |table: &str, col: &str| -> Result<(), rusqlite::Error> {
+        if !column_exists(conn, table, col) {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {col} TEXT NOT NULL DEFAULT 'default'"),
+                [],
+            )?;
+        }
+        Ok(())
+    };
+
+    add_default_text_col("agents", "namespace_id")?;
+    add_default_text_col("sessions", "namespace_id")?;
+    add_default_text_col("kv_store", "namespace_id")?;
+    add_default_text_col("task_queue", "namespace_id")?;
+    add_default_text_col("memories", "namespace_id")?;
+    add_default_text_col("canonical_sessions", "namespace_id")?;
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_agents_namespace ON agents(namespace_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_namespace ON sessions(namespace_id);
+        CREATE INDEX IF NOT EXISTS idx_kv_namespace ON kv_store(namespace_id);
+        CREATE INDEX IF NOT EXISTS idx_task_namespace ON task_queue(namespace_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace_id);
+        CREATE INDEX IF NOT EXISTS idx_canonical_namespace ON canonical_sessions(namespace_id);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (10, datetime('now'), 'Add namespace_id columns for core tables');
         ",
     )?;
     Ok(())

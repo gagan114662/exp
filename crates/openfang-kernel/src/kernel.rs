@@ -32,6 +32,8 @@ use openfang_types::memory::Memory;
 use openfang_types::tool::ToolDefinition;
 
 use async_trait::async_trait;
+use rusqlite::params;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
@@ -963,7 +965,7 @@ impl OpenFangKernel {
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
             supervisor,
-            workflows: WorkflowEngine::new(),
+            workflows: WorkflowEngine::new_persistent(memory.usage_conn()),
             triggers: TriggerEngine::new(),
             background,
             audit_log: Arc::new(AuditLog::new()),
@@ -3112,6 +3114,89 @@ impl OpenFangKernel {
         Ok((run_id, output))
     }
 
+    /// Pause a running workflow.
+    pub async fn pause_workflow_run(&self, run_id: WorkflowRunId) -> KernelResult<()> {
+        self.workflows
+            .pause_run(run_id)
+            .await
+            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e)))
+    }
+
+    /// Resume a previously paused workflow run from its persisted cursor.
+    pub async fn resume_workflow_run(&self, run_id: WorkflowRunId) -> KernelResult<String> {
+        let _start_idx = self
+            .workflows
+            .resume_run(run_id)
+            .await
+            .map_err(|e| KernelError::OpenFang(OpenFangError::Internal(e)))?;
+
+        // Agent resolver: looks up by name or ID in the registry
+        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String)> {
+            match agent_ref {
+                StepAgent::ById { id } => {
+                    let agent_id: AgentId = id.parse().ok()?;
+                    let entry = self.registry.get(agent_id)?;
+                    Some((agent_id, entry.name.clone()))
+                }
+                StepAgent::ByName { name } => {
+                    let entry = self.registry.find_by_name(name)?;
+                    Some((entry.id, entry.name.clone()))
+                }
+            }
+        };
+
+        let send_message = |agent_id: AgentId, message: String| async move {
+            self.send_message(agent_id, &message)
+                .await
+                .map(|r| {
+                    (
+                        r.response,
+                        r.total_usage.input_tokens,
+                        r.total_usage.output_tokens,
+                    )
+                })
+                .map_err(|e| format!("{e}"))
+        };
+
+        const MAX_WORKFLOW_SECS: u64 = 3600;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(MAX_WORKFLOW_SECS),
+            self.workflows.execute_run(run_id, resolver, send_message),
+        )
+        .await
+        .map_err(|_| {
+            KernelError::OpenFang(OpenFangError::Internal(format!(
+                "Workflow resume timed out after {MAX_WORKFLOW_SECS}s"
+            )))
+        })?
+        .map_err(|e| {
+            KernelError::OpenFang(OpenFangError::Internal(format!("Workflow failed: {e}")))
+        })
+    }
+
+    /// Recover stale workflow runs by pausing and resuming them.
+    pub fn recover_stalled_workflows(self: &Arc<Self>, stale_after_secs: u64) {
+        let kernel = Arc::clone(self);
+        tokio::spawn(async move {
+            let stale = kernel
+                .workflows
+                .recover_stalled_runs(stale_after_secs)
+                .await;
+            if stale.is_empty() {
+                return;
+            }
+            info!(count = stale.len(), "Recovering stale workflow run(s)");
+            for run_id in stale {
+                let kernel = Arc::clone(&kernel);
+                tokio::spawn(async move {
+                    if let Err(e) = kernel.resume_workflow_run(run_id).await {
+                        warn!(run_id = %run_id, "Failed to resume stale workflow: {e}");
+                    }
+                });
+            }
+        });
+    }
+
     /// Start background loops for all non-reactive agents.
     ///
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
@@ -3391,6 +3476,9 @@ impl OpenFangKernel {
                     }
                 });
             }
+
+            // Recover stale workflow runs from persisted cursor state on boot.
+            self.recover_stalled_workflows(300);
         }
 
         // Start WhatsApp Web gateway if WhatsApp channel is configured
@@ -4791,6 +4879,110 @@ impl KernelHandle for OpenFangKernel {
 
         let decision = self.approval_manager.request_approval(req).await;
         Ok(decision == ApprovalDecision::Approved)
+    }
+
+    fn tool_effect_get(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<openfang_types::tool::ToolResult>, String> {
+        let conn = self.memory.usage_conn();
+        let conn = conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT output_json FROM tool_effect_log
+                 WHERE idempotency_key = ?1 AND status = 'succeeded' LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let output_json: Option<String> = stmt
+            .query_row(params![idempotency_key], |row| row.get(0))
+            .ok();
+        match output_json {
+            Some(raw) => {
+                let result = serde_json::from_str::<openfang_types::tool::ToolResult>(&raw)
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(result))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn tool_effect_start(
+        &self,
+        idempotency_key: &str,
+        tool_name: &str,
+        input_hash: &str,
+    ) -> Result<(), String> {
+        let conn = self.memory.usage_conn();
+        let conn = conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO tool_effect_log (
+               idempotency_key, status, tool_name, input_hash, created_at, updated_at
+             ) VALUES (?1, 'started', ?2, ?3, ?4, ?5)
+             ON CONFLICT(idempotency_key) DO UPDATE SET
+               status = CASE
+                 WHEN tool_effect_log.status = 'succeeded' THEN tool_effect_log.status
+                 ELSE 'started'
+               END,
+               tool_name = excluded.tool_name,
+               input_hash = excluded.input_hash,
+               updated_at = excluded.updated_at",
+            params![
+                idempotency_key,
+                tool_name,
+                input_hash,
+                chrono::Utc::now().to_rfc3339(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn tool_effect_finish(
+        &self,
+        idempotency_key: &str,
+        output_hash: &str,
+        result: &openfang_types::tool::ToolResult,
+    ) -> Result<(), String> {
+        let conn = self.memory.usage_conn();
+        let conn = conn.lock().map_err(|e| e.to_string())?;
+        let output_json = serde_json::to_string(result).map_err(|e| e.to_string())?;
+        let status = if result.is_error {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(result.content.as_bytes());
+        let content_hash = hex::encode(hasher.finalize());
+
+        conn.execute(
+            "INSERT INTO tool_effect_log (
+               idempotency_key, status, tool_name, input_hash, output_hash, output_json, error_text, created_at, updated_at
+             ) VALUES (?1, ?2, '', '', ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(idempotency_key) DO UPDATE SET
+               status = excluded.status,
+               output_hash = excluded.output_hash,
+               output_json = excluded.output_json,
+               error_text = excluded.error_text,
+               updated_at = excluded.updated_at",
+            params![
+                idempotency_key,
+                status,
+                output_hash,
+                output_json,
+                if result.is_error {
+                    Some(result.content.clone())
+                } else {
+                    None
+                },
+                chrono::Utc::now().to_rfc3339(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = content_hash;
+        Ok(())
     }
 
     fn list_a2a_agents(&self) -> Vec<(String, String)> {

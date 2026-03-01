@@ -8,7 +8,7 @@ use axum::Json;
 use dashmap::DashMap;
 use openfang_kernel::triggers::{TriggerId, TriggerPattern};
 use openfang_kernel::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
 };
 use openfang_kernel::OpenFangKernel;
 use openfang_runtime::kernel_handle::KernelHandle;
@@ -661,6 +661,64 @@ pub async fn list_workflow_runs(
         })
         .collect();
     Json(list)
+}
+
+/// POST /api/workflows/runs/:run_id/pause — Pause a running workflow run.
+pub async fn pause_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = match run_id.parse::<uuid::Uuid>() {
+        Ok(u) => WorkflowRunId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow run ID"})),
+            );
+        }
+    };
+
+    match state.kernel.pause_workflow_run(run_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"run_id": run_id.to_string(), "status": "paused"})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// POST /api/workflows/runs/:run_id/resume — Resume a paused workflow run.
+pub async fn resume_workflow_run(
+    State(state): State<Arc<AppState>>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let run_id = match run_id.parse::<uuid::Uuid>() {
+        Ok(u) => WorkflowRunId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow run ID"})),
+            );
+        }
+    };
+
+    match state.kernel.resume_workflow_run(run_id).await {
+        Ok(output) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "run_id": run_id.to_string(),
+                "status": "completed",
+                "output": output
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

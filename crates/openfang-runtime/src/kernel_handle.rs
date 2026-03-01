@@ -134,6 +134,37 @@ pub trait KernelHandle: Send + Sync {
         Ok(true) // Default: auto-approve
     }
 
+    /// Return a cached tool result for an idempotency key, if present.
+    fn tool_effect_get(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<openfang_types::tool::ToolResult>, String> {
+        let _ = idempotency_key;
+        Ok(None)
+    }
+
+    /// Mark a tool effect as started for an idempotency key.
+    fn tool_effect_start(
+        &self,
+        idempotency_key: &str,
+        tool_name: &str,
+        input_hash: &str,
+    ) -> Result<(), String> {
+        let _ = (idempotency_key, tool_name, input_hash);
+        Ok(())
+    }
+
+    /// Persist final tool effect result under an idempotency key.
+    fn tool_effect_finish(
+        &self,
+        idempotency_key: &str,
+        output_hash: &str,
+        result: &openfang_types::tool::ToolResult,
+    ) -> Result<(), String> {
+        let _ = (idempotency_key, output_hash, result);
+        Ok(())
+    }
+
     /// List available Hands and their activation status.
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         Err("Hands system not available".to_string())

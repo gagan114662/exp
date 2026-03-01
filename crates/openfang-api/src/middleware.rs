@@ -14,6 +14,13 @@ use tracing::info;
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Auth scope derived from API token.
+#[derive(Clone, Debug)]
+pub struct AuthScope {
+    pub namespace_id: String,
+    pub role: String,
+}
+
 /// Middleware: inject a unique request ID and log the request/response.
 pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -79,16 +86,14 @@ pub async fn auth(
         return next.run(request).await;
     }
 
-    // Public endpoints that don't require auth (dashboard needs these)
+    // Public endpoints that don't require auth
     let path = request.uri().path();
     if path == "/"
         || path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/status"
         || path == "/api/version"
-        || path == "/api/agents"
         || path == "/api/profiles"
-        || path == "/api/config"
         || path.starts_with("/api/uploads/")
     {
         return next.run(request).await;
@@ -126,8 +131,34 @@ pub async fn auth(
         token.as_bytes().ct_eq(api_key.as_bytes()).into()
     });
 
-    // Accept if either auth method matches
+    // Resolve optional scoped token format:
+    // Bearer <namespace_id>:<role>:<api_key>
+    let mut scope = AuthScope {
+        namespace_id: "default".to_string(),
+        role: "owner".to_string(),
+    };
+    let scoped_token = bearer_token.or(query_token);
+    if let Some(tok) = scoped_token {
+        if let Some((ns, role, secret)) = parse_scoped_token(tok) {
+            use subtle::ConstantTimeEq;
+            let scoped_ok =
+                secret.len() == api_key.len() && secret.as_bytes().ct_eq(api_key.as_bytes()).into();
+            if scoped_ok {
+                scope = AuthScope {
+                    namespace_id: ns.to_string(),
+                    role: role.to_string(),
+                };
+                let mut request = request;
+                request.extensions_mut().insert(scope);
+                return next.run(request).await;
+            }
+        }
+    }
+
+    // Accept legacy auth if either method matches.
     if header_auth == Some(true) || query_auth == Some(true) {
+        let mut request = request;
+        request.extensions_mut().insert(scope);
         return next.run(request).await;
     }
 
@@ -146,6 +177,21 @@ pub async fn auth(
             serde_json::json!({"error": error_msg}).to_string(),
         ))
         .unwrap_or_default()
+}
+
+fn parse_scoped_token(token: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = token.splitn(3, ':');
+    let ns = parts.next()?;
+    let role = parts.next()?;
+    let secret = parts.next()?;
+    if ns.is_empty() || role.is_empty() || secret.is_empty() {
+        return None;
+    }
+    let role_ok = matches!(role, "viewer" | "user" | "admin" | "owner");
+    if !role_ok {
+        return None;
+    }
+    Some((ns, role, secret))
 }
 
 /// Security headers middleware — applied to ALL API responses.

@@ -38,6 +38,34 @@ impl std::str::FromStr for UserId {
     }
 }
 
+/// Logical namespace boundary for isolation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NamespaceId(pub String);
+
+impl NamespaceId {
+    /// Create a new namespace id.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Default namespace for legacy data.
+    pub fn default_namespace() -> Self {
+        Self("default".to_string())
+    }
+}
+
+impl Default for NamespaceId {
+    fn default() -> Self {
+        Self::default_namespace()
+    }
+}
+
+impl std::fmt::Display for NamespaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Model routing configuration — auto-selects cheap/mid/expensive models by complexity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

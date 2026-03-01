@@ -293,6 +293,14 @@ pub async fn build_router(
             "/api/workflows/{id}/runs",
             axum::routing::get(routes::list_workflow_runs),
         )
+        .route(
+            "/api/workflows/runs/{run_id}/pause",
+            axum::routing::post(routes::pause_workflow_run),
+        )
+        .route(
+            "/api/workflows/runs/{run_id}/resume",
+            axum::routing::post(routes::resume_workflow_run),
+        )
         // Skills endpoints
         .route("/api/skills", axum::routing::get(routes::list_skills))
         .route(

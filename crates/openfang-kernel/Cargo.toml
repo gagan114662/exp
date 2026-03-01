@@ -34,7 +34,9 @@ futures = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+sha2 = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { workspace = true }
 sentry = { workspace = true }
 sentry-tracing = { workspace = true }
 
