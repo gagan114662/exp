@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openfang.dev/schemas/sentry-workflow-emit.schema.json",
+  "title": "SentryWorkflowEmit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "emission_enabled",
+    "sent",
+    "reason_code",
+    "workflow",
+    "job",
+    "run_id",
+    "run_attempt",
+    "head_sha",
+    "timestamp",
+    "detail"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "emission_enabled": {
+      "type": "boolean"
+    },
+    "emit_on_failure_only": {
+      "type": "boolean"
+    },
+    "should_emit": {
+      "type": "boolean"
+    },
+    "sent": {
+      "type": "boolean"
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "infra_preflight_failed",
+        "live_provider_gate_failed",
+        "risk_policy_failed",
+        "agent_blocking_evals_failed",
+        "remediation_failed",
+        "codex_rate_limit_exhausted",
+        "findings_ingest_failed",
+        "workflow_failed_unknown",
+        "none"
+      ]
+    },
+    "workflow": {
+      "type": "string",
+      "minLength": 1
+    },
+    "job": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_attempt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "head_sha": {
+      "type": "string"
+    },
+    "pr_number": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "sentry_http_status": {
+      "type": "integer"
+    },
+    "classification_inputs": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

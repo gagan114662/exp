@@ -1,0 +1,258 @@
+name: agent-evals-live-pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: agent-evals-live-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-context:
+    name: resolve-context
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+      head_sha: ${{ steps.ctx.outputs.head_sha }}
+      head_repo: ${{ steps.ctx.outputs.head_repo }}
+      head_ref: ${{ steps.ctx.outputs.head_ref }}
+      risk_tier: ${{ steps.tier.outputs.risk_tier }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Resolve PR context
+        id: ctx
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const pr = context.payload.pull_request;
+            const prNumber = Number(pr.number);
+            const headSha = String(pr.head.sha);
+            const headRepo = String(pr.head.repo.full_name);
+            const headRef = String(pr.head.ref);
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+            fs.mkdirSync('artifacts/context', { recursive: true });
+            fs.writeFileSync('artifacts/context/changed_files.txt', files.map((f) => f.filename).join('\n') + '\n');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', headSha);
+            core.setOutput('head_repo', headRepo);
+            core.setOutput('head_ref', headRef);
+
+      - name: Compute risk tier
+        id: tier
+        run: |
+          PYTHONPATH=scripts/harness python3 - <<'PY'
+          from checks_resolver import compute_risk_tier, load_contract, read_changed_files
+          contract = load_contract(".harness/policy.contract.json")
+          changed = read_changed_files("artifacts/context/changed_files.txt")
+          tier = compute_risk_tier(changed, contract)
+          with open("/tmp/risk_tier.out", "w", encoding="utf-8") as f:
+              f.write(tier)
+          PY
+          echo "risk_tier=$(cat /tmp/risk_tier.out)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload context artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-live-context
+          path: artifacts/context/changed_files.txt
+          if-no-files-found: error
+
+  infra-preflight:
+    name: infra-preflight-agent-evals-live-pr
+    needs: resolve-context
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.preflight.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow agent-evals-live-pr \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Upload infra artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-live-infra
+          path: |
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
+          if-no-files-found: warn
+
+  run-live-provider-probes:
+    name: run-live-provider-probes
+    needs: [resolve-context, infra-preflight]
+    if: ${{ needs.infra-preflight.outputs.exit_code == '0' }}
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.live.outputs.exit_code }}
+      status: ${{ steps.live.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-context.outputs.head_repo }}
+          ref: ${{ needs.resolve-context.outputs.head_ref }}
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run live provider probes
+        id: live
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p artifacts/agent-evals
+          set +e
+          python3 scripts/harness/live_provider_probe.py \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --risk-tier "${{ needs.resolve-context.outputs.risk_tier }}" \
+            --out artifacts/agent-evals/live-provider-report.json
+          code=$?
+          set -e
+          status=$(jq -r '.status // "missing"' artifacts/agent-evals/live-provider-report.json)
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Upload live probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-live-artifacts
+          path: artifacts/agent-evals/live-provider-report.json
+          if-no-files-found: warn
+
+  agent-evals-live-pr:
+    name: agent-evals-live-pr
+    needs: [resolve-context, infra-preflight, run-live-provider-probes]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce live provider gate
+        run: |
+          if [ "${{ needs.infra-preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed."
+            exit 1
+          fi
+
+          tier="${{ needs.resolve-context.outputs.risk_tier }}"
+          if [ "$tier" = "critical" ] || [ "$tier" = "high" ]; then
+            if [ "${{ needs.run-live-provider-probes.outputs.exit_code }}" != "0" ]; then
+              echo "Live provider gate failed for risk tier $tier."
+              exit 1
+            fi
+          fi
+          echo "Live provider gate passed for risk tier $tier."
+
+      - name: Build workflow telemetry inputs
+        if: always()
+        run: |
+          mkdir -p artifacts/agent-evals
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          preflight_fail = '${{ needs.infra-preflight.outputs.exit_code }}' != '0'
+          live_exit = '${{ needs.run-live-provider-probes.outputs.exit_code }}'
+          live_status = '${{ needs.run-live-provider-probes.outputs.status }}' or 'missing'
+          tier = '${{ needs.resolve-context.outputs.risk_tier }}'
+
+          infra = {
+              "status": "fail" if preflight_fail else "pass",
+              "workflow": "agent-evals-live-pr",
+          }
+          Path("artifacts/infra-preflight-report.json").write_text(
+              json.dumps(infra, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+
+          live = {
+              "status": "fail" if live_exit and live_exit != "0" else live_status,
+              "blocking_applies": tier in {"critical", "high"},
+              "risk_tier": tier,
+          }
+          Path("artifacts/agent-evals/live-provider-report.json").write_text(
+              json.dumps(live, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "agent-evals-live-pr" \
+            --job "agent-evals-live-pr" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --pr-number "${{ needs.resolve-context.outputs.pr_number }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-live-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn

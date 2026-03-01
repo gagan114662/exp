@@ -21,6 +21,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: read
 
 concurrency:
@@ -46,6 +47,42 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow sentry-remediation-agent \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Enforce infra preflight
+        run: |
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed."
+            exit 1
+          fi
 
       - name: Install Codex CLI
         run: npm install -g @openai/codex
@@ -295,15 +332,49 @@ jobs:
               body,
             });
 
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          status="success"
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            status="failure"
+          fi
+          if [ "${{ steps.collect.outputs.should_remediate }}" = "true" ] && [ "${{ steps.remediate.outputs.exit_code }}" != "0" ]; then
+            status="failure"
+          fi
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "sentry-remediation-agent" \
+            --job "sentry-remediation-agent" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "$(git rev-parse HEAD)" \
+            --status "$status" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --remediation-result artifacts/remediation-result.json \
+            --codex-failover-result artifacts/codex-failover-result.json \
+            --sentry-findings artifacts/sentry-findings.json \
+            --out artifacts/sentry-workflow-emit.json
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sentry-remediation-artifacts
           path: |
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
             artifacts/sentry-findings.json
             artifacts/remediation-result.json
             artifacts/codex-failover-result.json
+            artifacts/sentry-workflow-emit.json
           if-no-files-found: error
 
       - name: Fail when remediation command fails

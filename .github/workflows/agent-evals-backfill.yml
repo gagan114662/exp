@@ -1,0 +1,190 @@
+name: agent-evals-backfill
+
+on:
+  schedule:
+    - cron: "45 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: agent-evals-backfill
+  cancel-in-progress: false
+
+jobs:
+  agent-evals-backfill:
+    name: agent-evals-backfill
+    runs-on: ubuntu-latest
+    env:
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG_SLUG: ${{ vars.SENTRY_ORG_SLUG }}
+      SENTRY_PROJECT_SLUG: ${{ vars.SENTRY_PROJECT_SLUG }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Collect Sentry findings for backfill
+        run: |
+          mkdir -p artifacts
+          org="${SENTRY_ORG_SLUG}"
+          project="${SENTRY_PROJECT_SLUG}"
+          if [ -n "$org" ] && [ -n "$project" ]; then
+            python3 scripts/harness/sentry_findings.py \
+              --org "$org" \
+              --project "$project" \
+              --query "is:unresolved level:error" \
+              --limit 50 \
+              --allow-missing-token \
+              --out artifacts/sentry-findings.json || true
+          else
+            python3 - <<'PY'
+            import json
+            from pathlib import Path
+            Path("artifacts/sentry-findings.json").write_text(
+                json.dumps({"provider":"sentry","status":"missing","findings":[],"errors":["missing sentry org/project"]}, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            PY
+          fi
+
+      - name: Run nightly evals for findings corpus
+        run: |
+          mkdir -p artifacts/agent-evals
+          python3 scripts/harness/agent_eval_runner.py \
+            --scenarios .harness/evals/scenarios.nightly.json \
+            --contract .harness/policy.contract.json \
+            --head-sha "$(git rev-parse HEAD)" \
+            --profile nightly \
+            --seed 42 \
+            --out-dir artifacts/agent-evals \
+            --enforce false
+
+      - name: Generate novel scenario candidates
+        id: backfill
+        run: |
+          python3 scripts/harness/novel_failure_backfill.py \
+            --contract .harness/policy.contract.json \
+            --sentry-findings artifacts/sentry-findings.json \
+            --eval-findings artifacts/agent-evals/eval-findings.json \
+            --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
+            --head-sha "$(git rev-parse HEAD)" \
+            --out artifacts/agent-evals/novel-failure-candidates.json
+          new_candidates=$(jq -r '.new_candidates // 0' artifacts/agent-evals/novel-failure-candidates.json)
+          echo "new_candidates=$new_candidates" >> "$GITHUB_OUTPUT"
+
+      - name: Commit generated scenario candidates
+        id: commit
+        if: ${{ steps.backfill.outputs.new_candidates != '0' }}
+        run: |
+          if git diff --quiet -- .harness/evals/scenarios.generated.json .harness/evals/novel-failure-signatures.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          branch="codex/eval-scenario-backfill-$(date -u +%Y%m%d)"
+          git checkout -B "$branch"
+          git config user.name "openfang-remediation-bot"
+          git config user.email "openfang-remediation-bot@users.noreply.github.com"
+          git add .harness/evals/scenarios.generated.json .harness/evals/novel-failure-signatures.json
+          git commit -m "chore(harness): backfill novel eval scenarios ($(date -u +%Y-%m-%d))"
+          git push --force-with-lease origin "$branch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update backfill PR
+        if: ${{ steps.commit.outputs.changed == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          NEW_CANDIDATES: ${{ steps.backfill.outputs.new_candidates }}
+        with:
+          script: |
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const head = `${owner}:${process.env.BRANCH}`;
+            const base = 'main';
+            const title = `chore(harness): novel eval scenario backfill (${process.env.NEW_CANDIDATES})`;
+            const body = [
+              'Automated nightly novel-failure backfill.',
+              '',
+              `- New candidate scenarios: ${process.env.NEW_CANDIDATES}`,
+              '- Files updated:',
+              '  - `.harness/evals/scenarios.generated.json`',
+              '  - `.harness/evals/novel-failure-signatures.json`',
+            ].join('\n');
+
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head,
+              base,
+              per_page: 100,
+            });
+
+            if (existing.length > 0) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existing[0].number,
+                title,
+                body,
+              });
+            } else {
+              await github.rest.pulls.create({
+                owner,
+                repo,
+                head: process.env.BRANCH,
+                base,
+                title,
+                body,
+              });
+            }
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "agent-evals-backfill" \
+            --job "agent-evals-backfill" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "$(git rev-parse HEAD)" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --sentry-findings artifacts/sentry-findings.json \
+            --eval-findings artifacts/agent-evals/eval-findings.json \
+            --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload backfill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-backfill-artifacts
+          path: |
+            artifacts/sentry-findings.json
+            artifacts/agent-evals/eval-results.json
+            artifacts/agent-evals/eval-findings.json
+            artifacts/agent-evals/novel-failure-candidates.json
+            artifacts/sentry-workflow-emit.json
+            .harness/evals/scenarios.generated.json
+            .harness/evals/novel-failure-signatures.json
+          if-no-files-found: warn

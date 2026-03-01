@@ -47,7 +47,10 @@
         "clippy",
         "security-audit",
         "integration-tests",
-        "code-review"
+        "code-review",
+        "agent-evals-pr",
+        "agent-evals-live-pr",
+        "infra-preflight"
       ],
       "reviewPolicy": {
         "minApprovals": 2,
@@ -66,7 +69,10 @@
         "build",
         "test",
         "clippy",
-        "integration-tests"
+        "integration-tests",
+        "agent-evals-pr",
+        "agent-evals-live-pr",
+        "infra-preflight"
       ],
       "reviewPolicy": {
         "minApprovals": 1
@@ -83,7 +89,9 @@
       "requiredChecks": [
         "build",
         "test",
-        "clippy"
+        "clippy",
+        "agent-evals-pr",
+        "infra-preflight"
       ],
       "reviewPolicy": {
         "minApprovals": 1
@@ -100,7 +108,8 @@
       ],
       "requiredChecks": [
         "risk-policy-gate",
-        "docs-lint"
+        "docs-lint",
+        "infra-preflight"
       ],
       "reviewPolicy": {
         "minApprovals": 0
@@ -196,6 +205,13 @@
       "maxAttemptsPerSha": 1,
       "applyCommandVar": "OPENFANG_CLAUDE_REMEDIATION_CMD",
       "validationCommandVar": "OPENFANG_CLAUDE_VALIDATION_CMD"
+    },
+    "evalRemediation": {
+      "enabled": true,
+      "triggerLabel": "eval-remediate",
+      "maxAttemptsPerSha": 1,
+      "applyCommandVar": "OPENFANG_EVAL_REMEDIATION_CMD",
+      "validationCommandVar": "OPENFANG_EVAL_VALIDATION_CMD"
     }
   },
   "evidencePolicy": {
@@ -243,5 +259,98 @@
     ],
     "requiredScreenshots": 2,
     "requireBeforeAfter": true
+  },
+  "agentEvalPolicy": {
+    "enabled": true,
+    "blockingCheckName": "agent-evals-pr",
+    "blockingProfile": {
+      "llm_mode": "mock_frozen",
+      "network_mode": "isolated",
+      "seed": 42
+    },
+    "nightlyProfile": {
+      "llm_mode": "mixed_advisory",
+      "network_mode": "restricted",
+      "seed": 42
+    },
+    "blockingThreshold": 1.0,
+    "maxScenarioRuntimeSecs": 90,
+    "remediationLabel": "eval-remediate",
+    "maxRemediationFindingsPerRun": 25,
+    "liveProviderGate": {
+      "enabled": true,
+      "blockingRiskTiers": [
+        "critical",
+        "high"
+      ],
+      "checkName": "agent-evals-live-pr",
+      "minSuccessfulProviders": 1,
+      "retries": {
+        "attempts": 3,
+        "backoffSeconds": [
+          5,
+          20,
+          60
+        ]
+      },
+      "providerCatalog": {
+        "openai": {
+          "env": "OPENAI_API_KEY",
+          "url": "https://api.openai.com/v1/models",
+          "method": "GET"
+        },
+        "anthropic": {
+          "env": "ANTHROPIC_API_KEY",
+          "url": "https://api.anthropic.com/v1/models",
+          "method": "GET"
+        },
+        "gemini": {
+          "env": "GEMINI_API_KEY",
+          "url": "https://generativelanguage.googleapis.com/v1beta/models",
+          "method": "GET"
+        }
+      },
+      "failIfNoProviderSecrets": true
+    },
+    "novelFailureBackfill": {
+      "enabled": true,
+      "maxNewScenariosPerRun": 25,
+      "minConfidence": 0.7,
+      "targetScenarioFile": ".harness/evals/scenarios.generated.json",
+      "dedupeFile": ".harness/evals/novel-failure-signatures.json",
+      "autoPr": true
+    },
+    "infraPreflight": {
+      "enabled": true,
+      "checkName": "infra-preflight",
+      "requiredForWorkflows": [
+        "risk-policy-gate",
+        "agent-evals-pr",
+        "agent-evals-live-pr",
+        "pr-review-harness",
+        "sentry-remediation-agent",
+        "claude-remediation-agent",
+        "agent-eval-remediation"
+      ],
+      "retryPolicy": {
+        "attempts": 3,
+        "backoffSeconds": [
+          5,
+          20,
+          60
+        ]
+      },
+      "incident": {
+        "enabled": true,
+        "label": "infra-incident",
+        "marker": "<!-- openfang-infra-incident -->"
+      }
+    }
+  },
+  "sentryWorkflowTelemetry": {
+    "enabled": true,
+    "emitOnFailureOnly": true,
+    "dsnEnv": "SENTRY_DSN",
+    "artifactPath": "artifacts/sentry-workflow-emit.json"
   }
 }

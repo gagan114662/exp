@@ -1,0 +1,110 @@
+name: agent-evals-nightly
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-evals-nightly
+  cancel-in-progress: false
+
+jobs:
+  run-nightly-evals:
+    name: run-nightly-evals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Resolve head SHA
+        id: sha
+        run: |
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Run nightly advisory evals
+        id: run
+        run: |
+          mkdir -p artifacts/agent-evals
+          set +e
+          python3 scripts/harness/agent_eval_runner.py \
+            --scenarios .harness/evals/scenarios.nightly.json \
+            --generated-scenarios .harness/evals/scenarios.generated.json \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ steps.sha.outputs.head_sha }}" \
+            --profile nightly \
+            --seed 42 \
+            --out-dir artifacts/agent-evals \
+            --enforce false
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Emit nightly eval metrics
+        if: always()
+        env:
+          OPENFANG_EVAL_EMIT_SENTRY_NIGHTLY: ${{ vars.OPENFANG_EVAL_EMIT_SENTRY_NIGHTLY || 'false' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ -f artifacts/agent-evals/eval-results.json ]; then
+            python3 scripts/harness/eval_metrics_emit.py \
+              --eval-results artifacts/agent-evals/eval-results.json \
+              --out artifacts/agent-evals/eval-metrics.json \
+              --emit-sentry "${OPENFANG_EVAL_EMIT_SENTRY_NIGHTLY}"
+          else
+            echo "eval-results.json missing; skipping metrics emit"
+          fi
+
+      - name: Upload nightly eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-nightly-artifacts
+          path: artifacts/agent-evals/
+          if-no-files-found: error
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "agent-evals-nightly" \
+            --job "run-nightly-evals" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ steps.sha.outputs.head_sha }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-nightly-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn
+
+      - name: Nightly summary
+        if: always()
+        run: |
+          echo "## Agent Evals (Nightly Advisory)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- head_sha: ${{ steps.sha.outputs.head_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- runner_exit_code: ${{ steps.run.outputs.exit_code }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/agent-evals/eval-summary.md ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/agent-evals/eval-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi

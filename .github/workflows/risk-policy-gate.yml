@@ -8,7 +8,7 @@ permissions:
   contents: read
   checks: read
   pull-requests: read
-  issues: read
+  issues: write
   actions: read
 
 concurrency:
@@ -33,6 +33,42 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow risk-policy-gate \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Enforce infra preflight
+        run: |
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed."
+            exit 1
+          fi
+
       - name: Detect changed files
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
@@ -40,6 +76,37 @@ jobs:
           git diff --name-only "$BASE_SHA...$HEAD_SHA" > changed_files.txt
           echo "Changed files:"
           cat changed_files.txt
+
+      - name: Resolve risk tier for live provider probe
+        id: tier
+        run: |
+          PYTHONPATH=scripts/harness python3 - <<'PY'
+          from checks_resolver import compute_risk_tier, load_contract, read_changed_files
+          contract = load_contract(".harness/policy.contract.json")
+          changed = read_changed_files("changed_files.txt")
+          tier = compute_risk_tier(changed, contract)
+          with open("/tmp/risk_tier.out", "w", encoding="utf-8") as f:
+              f.write(tier)
+          PY
+          echo "risk_tier=$(cat /tmp/risk_tier.out)" >> "$GITHUB_OUTPUT"
+
+      - name: Run live provider probe
+        id: live
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p artifacts/agent-evals
+          set +e
+          python3 scripts/harness/live_provider_probe.py \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --risk-tier "${{ steps.tier.outputs.risk_tier }}" \
+            --out artifacts/agent-evals/live-provider-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Ingest Claude feedback (advisory)
         env:
@@ -72,6 +139,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --review-findings artifacts/review-findings.json \
             --claude-findings artifacts/claude-findings.json \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
             --report-out artifacts/risk-policy-report.json
           code=$?
           set -e
@@ -89,6 +158,9 @@ jobs:
             artifacts/risk-policy-report.json
             artifacts/review-findings.json
             artifacts/claude-findings.json
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
+            artifacts/agent-evals/live-provider-report.json
           if-no-files-found: error
 
       - name: Enforce gate status
@@ -98,6 +170,40 @@ jobs:
             echo "risk-policy-gate blocked by policy decision: ${{ steps.gate.outputs.decision }}"
             exit 1
           fi
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "risk-policy-gate" \
+            --job "risk-policy-gate" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --pr-number "${{ github.event.pull_request.number }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
+            --risk-policy-report artifacts/risk-policy-report.json \
+            --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: risk-policy-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn
 
       - name: Gate summary
         if: always()

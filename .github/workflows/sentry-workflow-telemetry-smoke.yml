@@ -1,0 +1,212 @@
+name: sentry-workflow-telemetry-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      emit_sentry:
+        description: "Send events to Sentry during smoke run"
+        required: true
+        default: true
+        type: boolean
+      require_sentry_delivery:
+        description: "Fail run if Sentry delivery is not confirmed"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  smoke:
+    name: smoke-${{ matrix.reason_code }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        reason_code:
+          - infra_preflight_failed
+          - live_provider_gate_failed
+          - risk_policy_failed
+          - agent_blocking_evals_failed
+          - codex_rate_limit_exhausted
+          - remediation_failed
+          - findings_ingest_failed
+          - workflow_failed_unknown
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Prepare fixtures
+        env:
+          REASON: ${{ matrix.reason_code }}
+        run: |
+          mkdir -p artifacts/agent-evals
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          reason = os.environ["REASON"]
+
+          def write(path: str, payload: dict) -> None:
+              p = Path(path)
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+          if reason == "infra_preflight_failed":
+              write("artifacts/infra-preflight-report.json", {"status": "fail", "workflow": "smoke"})
+
+          elif reason == "live_provider_gate_failed":
+              write(
+                  "artifacts/agent-evals/live-provider-report.json",
+                  {
+                      "status": "fail",
+                      "blocking_applies": True,
+                      "risk_tier": "high",
+                      "successful_providers": 0,
+                      "detected_providers": 1,
+                  },
+              )
+
+          elif reason == "risk_policy_failed":
+              write("artifacts/risk-policy-report.json", {"decision": "fail", "status": "fail"})
+
+          elif reason == "agent_blocking_evals_failed":
+              write(
+                  "artifacts/agent-evals/eval-results.json",
+                  {
+                      "profile": "blocking",
+                      "summary": {"failed": 2, "all_blocking_passed": False},
+                  },
+              )
+
+          elif reason == "codex_rate_limit_exhausted":
+              write(
+                  "artifacts/codex-failover-result.json",
+                  {
+                      "final_exit_code": 1,
+                      "rate_limit_detected": True,
+                      "failover_triggered": True,
+                      "used_primary": True,
+                      "used_secondary": True,
+                  },
+              )
+
+          elif reason == "remediation_failed":
+              write(
+                  "artifacts/remediation-result.json",
+                  {
+                      "applied": False,
+                      "errors": ["validation failed"],
+                      "validation_passed": False,
+                  },
+              )
+
+          elif reason == "findings_ingest_failed":
+              write(
+                  "artifacts/claude-findings.json",
+                  {
+                      "provider": "claude",
+                      "status": "error",
+                      "findings": [],
+                      "errors": ["parse error"],
+                  },
+              )
+
+          elif reason == "workflow_failed_unknown":
+              # Intentionally leave classifier inputs absent.
+              pass
+
+          else:
+              raise SystemExit(f"Unsupported reason fixture: {reason}")
+          PY
+
+      - name: Run workflow Sentry emitter
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ inputs.emit_sentry }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "sentry-workflow-telemetry-smoke" \
+            --job "smoke" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ github.sha }}" \
+            --status "failure" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
+            --risk-policy-report artifacts/risk-policy-report.json \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --remediation-result artifacts/remediation-result.json \
+            --codex-failover-result artifacts/codex-failover-result.json \
+            --review-findings artifacts/review-findings.json \
+            --claude-findings artifacts/claude-findings.json \
+            --sentry-findings artifacts/sentry-findings.json \
+            --eval-findings artifacts/agent-evals/eval-findings.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Assert classification + artifact contract
+        env:
+          EXPECTED_REASON: ${{ matrix.reason_code }}
+        run: |
+          test -f artifacts/sentry-workflow-emit.json
+          actual_reason="$(jq -r '.reason_code' artifacts/sentry-workflow-emit.json)"
+          if [ "$actual_reason" != "$EXPECTED_REASON" ]; then
+            echo "Expected reason_code=$EXPECTED_REASON got $actual_reason"
+            cat artifacts/sentry-workflow-emit.json
+            exit 1
+          fi
+
+          for key in status emission_enabled sent reason_code workflow job run_id run_attempt head_sha timestamp detail; do
+            if ! jq -e ".${key}" artifacts/sentry-workflow-emit.json >/dev/null; then
+              echo "Missing required field: $key"
+              cat artifacts/sentry-workflow-emit.json
+              exit 1
+            fi
+          done
+
+      - name: Assert optional Sentry delivery
+        if: ${{ inputs.emit_sentry && inputs.require_sentry_delivery }}
+        run: |
+          sent="$(jq -r '.sent' artifacts/sentry-workflow-emit.json)"
+          if [ "$sent" != "true" ]; then
+            echo "Sentry delivery required but not confirmed."
+            cat artifacts/sentry-workflow-emit.json
+            exit 1
+          fi
+
+      - name: Upload smoke artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentry-workflow-telemetry-smoke-${{ matrix.reason_code }}
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: error
+
+  summary:
+    name: summary
+    needs: [smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        run: |
+          echo "## Sentry Workflow Telemetry Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "- emit_sentry: ${{ inputs.emit_sentry }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- require_sentry_delivery: ${{ inputs.require_sentry_delivery }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- result: ${{ needs.smoke.result }}" >> "$GITHUB_STEP_SUMMARY"

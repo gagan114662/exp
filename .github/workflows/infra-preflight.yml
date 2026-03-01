@@ -1,0 +1,101 @@
+name: infra-preflight
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: infra-preflight-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  infra-preflight:
+    name: infra-preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow infra-preflight \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          status="success"
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            status="failure"
+          fi
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "infra-preflight" \
+            --job "infra-preflight" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ github.event.pull_request.head.sha || '' }}" \
+            --pr-number "${{ github.event.pull_request.number || '' }}" \
+            --status "$status" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload infra preflight artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-preflight-artifacts
+          path: |
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
+            artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn
+
+      - name: Enforce infra preflight
+        if: always()
+        run: |
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed."
+            exit 1
+          fi
+          echo "Infra preflight passed."

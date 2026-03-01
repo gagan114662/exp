@@ -129,7 +129,10 @@ jobs:
     if: ${{ needs.resolve-context.outputs.should_block_fork != 'true' }}
     runs-on: ubuntu-latest
     outputs:
+      preflight_exit_code: ${{ steps.preflight.outputs.exit_code }}
+      live_exit_code: ${{ steps.live.outputs.exit_code }}
       gate_exit_code: ${{ steps.gate.outputs.exit_code }}
+      eval_exit_code: ${{ steps.evals.outputs.exit_code }}
       evidence_exit_code: ${{ steps.verify.outputs.exit_code }}
       ui_impact: ${{ steps.ui.outputs.ui_impact }}
     steps:
@@ -147,6 +150,42 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install pillow
+
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow pr-review-harness \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Enforce infra preflight
+        run: |
+          if [ "${{ steps.preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed."
+            exit 1
+          fi
 
       - name: Download context artifact
         uses: actions/download-artifact@v4
@@ -173,6 +212,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg jq
+
+      - name: Compute risk tier
+        id: risk_tier
+        run: |
+          PYTHONPATH=scripts/harness python3 - <<'PY'
+          from checks_resolver import compute_risk_tier, load_contract, read_changed_files
+          contract = load_contract(".harness/policy.contract.json")
+          changed = read_changed_files("artifacts/context/changed_files.txt")
+          tier = compute_risk_tier(changed, contract)
+          with open("/tmp/risk_tier.out", "w", encoding="utf-8") as f:
+              f.write(tier)
+          PY
+          echo "risk_tier=$(cat /tmp/risk_tier.out)" >> "$GITHUB_OUTPUT"
+
+      - name: Run live provider probe
+        id: live
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p artifacts/agent-evals
+          set +e
+          python3 scripts/harness/live_provider_probe.py \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --risk-tier "${{ steps.risk_tier.outputs.risk_tier }}" \
+            --out artifacts/agent-evals/live-provider-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Detect UI impact
         id: ui
@@ -248,6 +318,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --review-findings artifacts/review-findings.json \
             --claude-findings artifacts/claude-findings.json \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
             --browser-evidence-manifest artifacts/browser-evidence-manifest.json \
             --report-out artifacts/risk-policy-report.json
           code=$?
@@ -264,6 +336,38 @@ jobs:
             --out-manifest artifacts/browser-evidence-manifest.json \
             --ui-impact "${{ steps.ui.outputs.ui_impact }}" \
             --playwright-json artifacts/playwright-evidence.json
+
+      - name: Run deterministic blocking agent evals
+        id: evals
+        run: |
+          set +e
+          python3 scripts/harness/agent_eval_runner.py \
+            --scenarios .harness/evals/scenarios.blocking.json \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --profile blocking \
+            --seed 42 \
+            --changed-files artifacts/context/changed_files.txt \
+            --out-dir artifacts/agent-evals \
+            --enforce true
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Emit eval metrics (advisory telemetry)
+        if: always()
+        env:
+          OPENFANG_EVAL_EMIT_SENTRY: ${{ vars.OPENFANG_EVAL_EMIT_SENTRY || 'false' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ -f artifacts/agent-evals/eval-results.json ]; then
+            python3 scripts/harness/eval_metrics_emit.py \
+              --eval-results artifacts/agent-evals/eval-results.json \
+              --out artifacts/agent-evals/eval-metrics.json \
+              --emit-sentry "${OPENFANG_EVAL_EMIT_SENTRY}"
+          else
+            echo "eval-results.json missing; skipping metrics emit"
+          fi
 
       - name: Verify evidence manifest
         id: verify
@@ -293,8 +397,15 @@ jobs:
           path: |
             artifacts/context/changed_files.txt
             artifacts/risk-policy-report.json
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
             artifacts/review-findings.json
             artifacts/claude-findings.json
+            artifacts/agent-evals/live-provider-report.json
+            artifacts/agent-evals/eval-results.json
+            artifacts/agent-evals/eval-findings.json
+            artifacts/agent-evals/eval-summary.md
+            artifacts/agent-evals/eval-metrics.json
             artifacts/browser-evidence-manifest.json
             artifacts/playwright-evidence.json
             artifacts/pr-review/evidence/
@@ -322,10 +433,13 @@ jobs:
       - name: Normalize evidence artifact paths
         run: |
           set -euo pipefail
-          mkdir -p artifacts/context artifacts/pr-review artifacts/pr-review/evidence
+          mkdir -p artifacts/context artifacts/pr-review artifacts/pr-review/evidence artifacts/agent-evals
           changed_file=$(find . -type f -name changed_files.txt | head -1 || true)
           risk_report=$(find . -type f -name risk-policy-report.json | head -1 || true)
+          infra_report=$(find . -type f -name infra-preflight-report.json | head -1 || true)
+          live_report=$(find . -type f -name live-provider-report.json | head -1 || true)
           evidence_manifest=$(find . -type f -name browser-evidence-manifest.json | head -1 || true)
+          eval_results=$(find . -type f -name eval-results.json | head -1 || true)
           claude_findings=$(find . -type f -name claude-findings.json | head -1 || true)
           if [ -z "$changed_file" ] || [ -z "$evidence_manifest" ]; then
             echo "required evidence artifacts not found after download"
@@ -335,6 +449,12 @@ jobs:
           if [ -n "$risk_report" ]; then
             cp "$risk_report" artifacts/risk-policy-report.json
           fi
+          if [ -n "$infra_report" ]; then
+            cp "$infra_report" artifacts/infra-preflight-report.json
+          fi
+          if [ -n "$live_report" ]; then
+            cp "$live_report" artifacts/agent-evals/live-provider-report.json
+          fi
           if [ -n "$claude_findings" ]; then
             src_claude="$(realpath "$claude_findings")"
             dst_claude="$(realpath -m artifacts/claude-findings.json)"
@@ -343,6 +463,9 @@ jobs:
             fi
           fi
           cp "$evidence_manifest" artifacts/browser-evidence-manifest.json
+          if [ -n "$eval_results" ]; then
+            cp "$eval_results" artifacts/agent-evals/eval-results.json
+          fi
 
       - name: Build PR packet
         id: packet
@@ -355,6 +478,9 @@ jobs:
             --contract .harness/policy.contract.json \
             --changed-files artifacts/context/changed_files.txt \
             --risk-report artifacts/risk-policy-report.json \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --live-provider-report artifacts/agent-evals/live-provider-report.json \
+            --eval-results artifacts/agent-evals/eval-results.json \
             --claude-findings artifacts/claude-findings.json \
             --evidence-manifest artifacts/browser-evidence-manifest.json \
             --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
@@ -443,6 +569,8 @@ jobs:
             "browser-evidence-manifest.json"
             "acceptance-checklist.md"
             "acceptance-checklist.json"
+            "eval-summary.md"
+            "eval-results.json"
           )
           for f in "${optional_files[@]}"; do
             src=$(find . -type f -name "$f" | head -1 || true)
@@ -522,6 +650,8 @@ jobs:
           - [Walkthrough video (direct file)]({raw}/00-implementation-walkthrough.mp4)
           - [Evidence manifest]({blob}/browser-evidence-manifest.json)
           - [Acceptance checklist]({blob}/acceptance-checklist.md)
+          - [Agent eval summary]({blob}/eval-summary.md)
+          - [Agent eval results]({blob}/eval-results.json)
 
           ![Diff screenshot]({raw}/01-diff-summary.png)
           ![Verification screenshot]({raw}/02-verification-summary.png)
@@ -605,8 +735,18 @@ jobs:
             exit 1
           fi
 
+          if [ "${{ needs.collect-evidence.outputs.preflight_exit_code }}" != "0" ]; then
+            echo "Infra preflight failed inside PR review harness."
+            exit 1
+          fi
+
           if [ "${{ needs.collect-evidence.outputs.gate_exit_code }}" != "0" ]; then
             echo "risk-policy-gate failed inside PR review harness."
+            exit 1
+          fi
+
+          if [ "${{ needs.collect-evidence.outputs.eval_exit_code }}" != "0" ]; then
+            echo "Deterministic agent evals failed."
             exit 1
           fi
 
@@ -626,3 +766,78 @@ jobs:
           fi
 
           echo "PR review harness passed."
+
+      - name: Build workflow telemetry inputs
+        if: always()
+        run: |
+          mkdir -p artifacts/agent-evals
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          preflight_fail = '${{ needs.collect-evidence.outputs.preflight_exit_code }}' != '0'
+          gate_fail = '${{ needs.collect-evidence.outputs.gate_exit_code }}' != '0'
+          eval_fail = '${{ needs.collect-evidence.outputs.eval_exit_code }}' != '0'
+
+          infra = {
+              "status": "fail" if preflight_fail else "pass",
+              "workflow": "pr-review-harness",
+          }
+          Path("artifacts/infra-preflight-report.json").write_text(
+              json.dumps(infra, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+
+          risk = {
+              "decision": "fail" if gate_fail else "pass",
+              "status": "fail" if gate_fail else "pass",
+          }
+          Path("artifacts/risk-policy-report.json").write_text(
+              json.dumps(risk, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+
+          eval_payload = {
+              "profile": "blocking",
+              "summary": {
+                  "failed": 1 if eval_fail else 0,
+                  "all_blocking_passed": not eval_fail,
+              },
+          }
+          Path("artifacts/agent-evals/eval-results.json").write_text(
+              json.dumps(eval_payload, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "pr-review-harness" \
+            --job "pr-review-harness" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --pr-number "${{ needs.resolve-context.outputs.pr_number }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --risk-policy-report artifacts/risk-policy-report.json \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-harness-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn

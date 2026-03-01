@@ -1,4 +1,4 @@
-name: claude-remediation-agent
+name: agent-eval-remediation
 
 on:
   pull_request:
@@ -12,11 +12,11 @@ on:
 
 permissions:
   contents: write
-  pull-requests: read
+  pull-requests: write
   issues: write
 
 concurrency:
-  group: claude-remediation-agent-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  group: agent-eval-remediation-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -46,22 +46,14 @@ jobs:
             } else if (eventName === 'workflow_dispatch') {
               const inputPr = Number(core.getInput('pr_number', { required: true }));
               const actor = context.actor;
-              const perm = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner,
-                repo,
-                username: actor,
-              });
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: actor });
               const level = String(perm.data.permission || '');
               const allowed = ['admin', 'maintain', 'write'].includes(level);
               if (!allowed) {
                 core.setFailed(`workflow_dispatch denied for actor=${actor} permission=${level}`);
                 return;
               }
-              const prResp = await github.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: inputPr,
-              });
+              const prResp = await github.rest.pulls.get({ owner, repo, pull_number: inputPr });
               pr = prResp.data;
             } else {
               core.setFailed(`Unsupported event: ${eventName}`);
@@ -74,7 +66,6 @@ jobs:
             const headRef = String(pr.head.ref);
             const isFork = headRepo !== `${owner}/${repo}`;
             const labels = (pr.labels || []).map((label) => String(label.name || ''));
-            const shouldRun = true;
 
             core.setOutput('pr_number', String(prNumber));
             core.setOutput('head_sha', headSha);
@@ -82,17 +73,17 @@ jobs:
             core.setOutput('head_ref', headRef);
             core.setOutput('is_fork', String(isFork));
             core.setOutput('labels_csv', labels.join(','));
-            core.setOutput('should_run', String(shouldRun));
+            core.setOutput('should_run', 'true');
 
-  claude-remediation-agent:
-    name: claude-remediation-agent
+  agent-eval-remediation:
+    name: agent-eval-remediation
     needs: resolve-context
     if: ${{ needs.resolve-context.outputs.should_run == 'true' && needs.resolve-context.outputs.is_fork != 'true' }}
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      OPENFANG_CLAUDE_REMEDIATION_CMD: ${{ vars.OPENFANG_CLAUDE_REMEDIATION_CMD }}
-      OPENFANG_CLAUDE_VALIDATION_CMD: ${{ vars.OPENFANG_CLAUDE_VALIDATION_CMD }}
+      OPENFANG_EVAL_REMEDIATION_CMD: ${{ vars.OPENFANG_EVAL_REMEDIATION_CMD }}
+      OPENFANG_EVAL_VALIDATION_CMD: ${{ vars.OPENFANG_EVAL_VALIDATION_CMD }}
       OPENFANG_CODEX_INSTALL_CMD: ${{ vars.OPENFANG_CODEX_INSTALL_CMD }}
       CODEX_AUTH_JSON_B64_PRIMARY: ${{ secrets.CODEX_AUTH_JSON_B64_PRIMARY }}
       CODEX_AUTH_JSON_B64_SECONDARY: ${{ secrets.CODEX_AUTH_JSON_B64_SECONDARY }}
@@ -106,8 +97,7 @@ jobs:
           fetch-depth: 0
           clean: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
@@ -120,7 +110,7 @@ jobs:
           set +e
           python3 scripts/harness/infra_preflight.py \
             --contract .harness/policy.contract.json \
-            --workflow claude-remediation-agent \
+            --workflow agent-eval-remediation \
             --repo "${{ github.repository }}" \
             --token-env GITHUB_TOKEN \
             --out artifacts/infra-preflight-report.json
@@ -161,16 +151,19 @@ jobs:
           from pathlib import Path
 
           contract = json.loads(Path('.harness/policy.contract.json').read_text(encoding='utf-8'))
-          cfg = contract.get('automation', {}).get('claudeRemediation', {})
-          enabled = bool(cfg.get('enabled', True))
-          trigger_label = str(cfg.get('triggerLabel', 'claude-remediate'))
-          max_attempts = int(cfg.get('maxAttemptsPerSha', 1) or 1)
-          with open('/tmp/claude_cfg.out', 'w', encoding='utf-8') as f:
+          eval_policy = contract.get('agentEvalPolicy', {}) if isinstance(contract.get('agentEvalPolicy'), dict) else {}
+          auto = contract.get('automation', {}).get('evalRemediation', {}) if isinstance(contract.get('automation', {}), dict) else {}
+          enabled = bool(eval_policy.get('enabled', True) and auto.get('enabled', True))
+          trigger_label = str(auto.get('triggerLabel', eval_policy.get('remediationLabel', 'eval-remediate')))
+          max_attempts = int(auto.get('maxAttemptsPerSha', 1) or 1)
+          max_findings = int(eval_policy.get('maxRemediationFindingsPerRun', 25) or 25)
+          with open('/tmp/eval_cfg.out', 'w', encoding='utf-8') as f:
               f.write(f'enabled={str(enabled).lower()}\n')
               f.write(f'trigger_label={trigger_label}\n')
               f.write(f'max_attempts={max_attempts}\n')
+              f.write(f'max_findings={max_findings}\n')
           PY
-          cat /tmp/claude_cfg.out >> "$GITHUB_OUTPUT"
+          cat /tmp/eval_cfg.out >> "$GITHUB_OUTPUT"
 
       - name: Evaluate label gate
         id: label_gate
@@ -188,74 +181,64 @@ jobs:
             echo "run_remediation=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check one-attempt-per-SHA guard
-        id: attempt_guard
+      - name: Run deterministic evals for remediation findings
         if: ${{ steps.label_gate.outputs.run_remediation == 'true' }}
         run: |
-          marker="claude-remediation: ${{ needs.resolve-context.outputs.head_sha }}"
-          if git log --oneline --grep "$marker" -n 1 | grep -q .; then
-            echo "already_attempted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "already_attempted=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Ingest Claude feedback
-        if: ${{ steps.label_gate.outputs.run_remediation == 'true' }}
-        run: |
-          mkdir -p artifacts
-          python3 scripts/harness/claude_feedback_ingest.py \
-            --repo "${{ github.repository }}" \
-            --pr "${{ needs.resolve-context.outputs.pr_number }}" \
-            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+          mkdir -p artifacts/agent-evals
+          python3 scripts/harness/agent_eval_runner.py \
+            --scenarios .harness/evals/scenarios.blocking.json \
             --contract .harness/policy.contract.json \
-            --token-env GITHUB_TOKEN \
-            --out artifacts/claude-findings.json
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --profile blocking \
+            --seed 42 \
+            --out-dir artifacts/agent-evals \
+            --enforce false
 
-      - name: Parse Claude findings status
+      - name: Parse eval findings
         id: findings
         if: ${{ steps.label_gate.outputs.run_remediation == 'true' }}
         run: |
-          status=$(jq -r '.status' artifacts/claude-findings.json)
-          actionable=$(jq '[.findings[] | select(.actionable)] | length' artifacts/claude-findings.json)
+          status=$(jq -r '.status' artifacts/agent-evals/eval-findings.json)
+          actionable=$(jq '[.findings[] | select(.actionable == true)] | length' artifacts/agent-evals/eval-findings.json)
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "actionable_count=$actionable" >> "$GITHUB_OUTPUT"
           if [ "$status" = "error" ]; then
-            echo "Claude feedback ingestion failed"
+            echo "Eval findings generation failed"
             exit 1
           fi
 
-      - name: Run constrained Claude remediation
+      - name: Run constrained eval remediation
         id: remediate
-        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.attempt_guard.outputs.already_attempted != 'true' && steps.cfg.outputs.enabled == 'true' }}
+        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.cfg.outputs.enabled == 'true' }}
         run: |
-          if [ -z "${OPENFANG_CLAUDE_REMEDIATION_CMD}" ]; then
-            echo "OPENFANG_CLAUDE_REMEDIATION_CMD is empty"
-            exit 1
-          fi
+          default_cmd="codex exec --json --approval-mode full-auto --quiet 'Read .eval-findings-context.md and fix every listed issue. Keep changes minimal. Only edit project files needed by findings. Run cargo build --workspace --lib before finalizing.'"
+          apply_cmd="${OPENFANG_EVAL_REMEDIATION_CMD:-$default_cmd}"
+          validation_cmd="${OPENFANG_EVAL_VALIDATION_CMD:-cargo build --workspace --lib}"
 
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          findings_path = Path("artifacts/claude-findings.json")
+          findings_path = Path("artifacts/agent-evals/eval-findings.json")
           payload = json.loads(findings_path.read_text(encoding="utf-8"))
           findings = [f for f in payload.get("findings", []) if f.get("actionable")][:10]
 
           lines = [
-              "You are running constrained Claude remediation in OpenFang.",
-              "Fix actionable findings with minimal, safe edits.",
+              "You are running constrained eval remediation in OpenFang.",
+              "Fix actionable eval findings with minimal, safe edits.",
               "Hard constraints:",
-              "- Do not touch CI/workflows/secrets/config for this task.",
-              "- Keep edits limited to files required by findings.",
-              "- Run configured validation command if present.",
+              "- Do not edit CI/workflows/secrets unless explicitly required by the finding.",
+              "- Keep changes limited to files required by findings.",
+              "- Preserve existing policy and remediation guardrails.",
               "",
-              "Actionable findings:",
+              "Actionable eval findings:",
           ]
+
           if findings:
               for finding in findings:
                   path = finding.get("path") or "unknown"
                   line = finding.get("line") or 1
-                  summary = finding.get("summary") or "Claude finding"
+                  summary = finding.get("summary") or "Eval failure"
                   severity = finding.get("severity") or "medium"
                   lines.append(f"- [{severity}] {summary} ({path}:{line})")
           else:
@@ -267,22 +250,19 @@ jobs:
                   "Return only implemented code changes and brief verification notes.",
               ]
           )
-          Path(".claude-findings-context.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          Path(".eval-findings-context.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
 
           set +e
           cmd=(python3 scripts/harness/codex_failover_runner.py \
-            --findings artifacts/claude-findings.json \
+            --findings artifacts/agent-evals/eval-findings.json \
             --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
             --max-attempts "${{ steps.cfg.outputs.max_attempts }}" \
-            --attempt-log /tmp/claude-remediation-attempts.json \
-            --apply-cmd "${OPENFANG_CLAUDE_REMEDIATION_CMD}" \
+            --attempt-log /tmp/eval-remediation-attempts.json \
+            --apply-cmd "${apply_cmd}" \
             --result-out artifacts/remediation-result.json \
             --failover-out artifacts/codex-failover-result.json)
-
-          if [ -n "${OPENFANG_CLAUDE_VALIDATION_CMD}" ]; then
-            cmd+=(--validation-cmd "${OPENFANG_CLAUDE_VALIDATION_CMD}")
-          fi
+          cmd+=(--validation-cmd "${validation_cmd}")
 
           "${cmd[@]}"
           code=$?
@@ -292,13 +272,14 @@ jobs:
               code="$final_code"
             fi
           fi
-          rm -f .claude-findings-context.md
+          rm -f .eval-findings-context.md
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Write skipped remediation result
-        if: ${{ steps.label_gate.outputs.run_remediation != 'true' || steps.findings.outputs.actionable_count == '0' || steps.attempt_guard.outputs.already_attempted == 'true' || steps.cfg.outputs.enabled != 'true' }}
+        if: ${{ steps.label_gate.outputs.run_remediation != 'true' || steps.findings.outputs.actionable_count == '0' || steps.cfg.outputs.enabled != 'true' }}
         run: |
+          mkdir -p artifacts
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -314,13 +295,10 @@ jobs:
           if '${{ steps.label_gate.outputs.run_remediation }}' != 'true':
               payload['errors'].append('label gate not satisfied for configured trigger label')
           if '${{ steps.cfg.outputs.enabled }}' != 'true':
-              payload['errors'].append('claude remediation disabled in contract')
-          if '${{ steps.attempt_guard.outputs.already_attempted }}' == 'true':
-              payload['errors'].append('max remediation attempts exceeded for head SHA')
+              payload['errors'].append('eval remediation disabled in contract')
           if '${{ steps.findings.outputs.actionable_count }}' == '0':
-              payload['errors'].append('no actionable claude findings detected')
+              payload['errors'].append('no actionable eval findings detected')
 
-          Path('artifacts').mkdir(parents=True, exist_ok=True)
           Path('artifacts/remediation-result.json').write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n', encoding='utf-8')
           Path('artifacts/codex-failover-result.json').write_text(
               json.dumps(
@@ -343,23 +321,77 @@ jobs:
           )
           PY
 
-      - name: Commit and push remediation fix
-        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.attempt_guard.outputs.already_attempted != 'true' && steps.cfg.outputs.enabled == 'true' && steps.remediate.outputs.exit_code == '0' }}
+      - name: Commit remediation to bot branch
+        id: commit
+        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.cfg.outputs.enabled == 'true' && steps.remediate.outputs.exit_code == '0' }}
         run: |
           if git diff --quiet && git diff --cached --quiet; then
-            echo "No remediation changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          branch="codex/eval-remediation-pr-${{ needs.resolve-context.outputs.pr_number }}"
+          git checkout -B "$branch"
           git config user.name "openfang-remediation-bot"
           git config user.email "openfang-remediation-bot@users.noreply.github.com"
+          git add -A -- . ':(exclude)artifacts/**' ':(exclude).harness/state/remediation-attempts.json'
+          git commit -m "chore(harness): eval remediation for sha:${{ needs.resolve-context.outputs.head_sha }}"
+          git push --force-with-lease origin "$branch"
 
-          git add -A -- . \
-            ':(exclude)artifacts/**' \
-            ':(exclude).harness/state/remediation-attempts.json' \
-            ':(exclude).claude-findings-context.md'
-          git commit -m "chore(harness): claude remediation for sha:${{ needs.resolve-context.outputs.head_sha }}" -m "claude-remediation: ${{ needs.resolve-context.outputs.head_sha }}"
-          git push origin HEAD:${{ needs.resolve-context.outputs.head_ref }}
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update remediation PR
+        if: ${{ steps.commit.outputs.changed == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          BASE_REF: ${{ needs.resolve-context.outputs.head_ref }}
+          ACTIONABLE_COUNT: ${{ steps.findings.outputs.actionable_count }}
+          TARGET_PR: ${{ needs.resolve-context.outputs.pr_number }}
+        with:
+          script: |
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const head = `${owner}:${process.env.BRANCH}`;
+            const base = process.env.BASE_REF;
+            const actionable = Number(process.env.ACTIONABLE_COUNT || '0');
+            const targetPr = Number(process.env.TARGET_PR || '0');
+
+            const body = [
+              `Automated eval remediation for PR #${targetPr}.`,
+              '',
+              `- Actionable eval findings considered: ${actionable}`,
+              '- Source: artifacts/agent-evals/eval-findings.json',
+              '- Generated by label-gated `agent-eval-remediation` workflow.',
+            ].join('\n');
+
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head,
+              base,
+              per_page: 100,
+            });
+
+            if (existing.length > 0) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: existing[0].number,
+                body,
+                title: `chore: eval remediation for PR #${targetPr}`,
+              });
+            } else {
+              await github.rest.pulls.create({
+                owner,
+                repo,
+                head: process.env.BRANCH,
+                base,
+                title: `chore: eval remediation for PR #${targetPr}`,
+                body,
+              });
+            }
 
       - name: Emit workflow failure telemetry
         if: always()
@@ -373,7 +405,6 @@ jobs:
           fi
           if [ "${{ steps.label_gate.outputs.run_remediation }}" = "true" ] && \
              [ "${{ steps.findings.outputs.actionable_count }}" != "0" ] && \
-             [ "${{ steps.attempt_guard.outputs.already_attempted }}" != "true" ] && \
              [ "${{ steps.cfg.outputs.enabled }}" = "true" ] && \
              [ "${{ steps.remediate.outputs.exit_code }}" != "0" ]; then
             status="failure"
@@ -382,8 +413,8 @@ jobs:
             status="failure"
           fi
           python3 scripts/harness/workflow_sentry_emit.py \
-            --workflow "claude-remediation-agent" \
-            --job "claude-remediation-agent" \
+            --workflow "agent-eval-remediation" \
+            --job "agent-eval-remediation" \
             --run-id "${{ github.run_id }}" \
             --run-attempt "${{ github.run_attempt }}" \
             --event "${{ github.event_name }}" \
@@ -395,39 +426,30 @@ jobs:
             --emit-on-failure-only "true" \
             --sentry-dsn-env "SENTRY_DSN" \
             --infra-preflight-report artifacts/infra-preflight-report.json \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --eval-findings artifacts/agent-evals/eval-findings.json \
             --remediation-result artifacts/remediation-result.json \
             --codex-failover-result artifacts/codex-failover-result.json \
-            --claude-findings artifacts/claude-findings.json \
             --out artifacts/sentry-workflow-emit.json
 
-      - name: Upload Claude remediation artifacts
+      - name: Upload remediation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-remediation-artifacts
+          name: agent-eval-remediation-artifacts
           path: |
             artifacts/infra-preflight-report.json
             artifacts/infra-incident-upsert.json
-            artifacts/claude-findings.json
+            artifacts/agent-evals/eval-results.json
+            artifacts/agent-evals/eval-findings.json
+            artifacts/agent-evals/eval-summary.md
             artifacts/remediation-result.json
             artifacts/codex-failover-result.json
             artifacts/sentry-workflow-emit.json
           if-no-files-found: warn
 
       - name: Fail workflow when remediation fails
-        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.attempt_guard.outputs.already_attempted != 'true' && steps.cfg.outputs.enabled == 'true' && steps.remediate.outputs.exit_code != '0' }}
+        if: ${{ steps.label_gate.outputs.run_remediation == 'true' && steps.findings.outputs.actionable_count != '0' && steps.cfg.outputs.enabled == 'true' && steps.remediate.outputs.exit_code != '0' }}
         run: |
-          echo "Claude remediation failed"
+          echo "Eval remediation failed; inspect agent-eval-remediation-artifacts."
           exit 1
-
-  skipped:
-    name: skipped
-    needs: resolve-context
-    if: ${{ needs.resolve-context.outputs.should_run != 'true' || needs.resolve-context.outputs.is_fork == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain skip
-        run: |
-          echo "claude-remediation-agent skipped"
-          echo "should_run=${{ needs.resolve-context.outputs.should_run }}"
-          echo "is_fork=${{ needs.resolve-context.outputs.is_fork }}"

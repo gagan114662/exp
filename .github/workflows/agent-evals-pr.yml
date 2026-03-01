@@ -1,0 +1,297 @@
+name: agent-evals-pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: agent-evals-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-context:
+    name: resolve-context
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.ctx.outputs.pr_number }}
+      head_sha: ${{ steps.ctx.outputs.head_sha }}
+      head_repo: ${{ steps.ctx.outputs.head_repo }}
+      head_ref: ${{ steps.ctx.outputs.head_ref }}
+    steps:
+      - name: Resolve PR context
+        id: ctx
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const pr = context.payload.pull_request;
+            const prNumber = Number(pr.number);
+            const headSha = String(pr.head.sha);
+            const headRepo = String(pr.head.repo.full_name);
+            const headRef = String(pr.head.ref);
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            fs.mkdirSync('artifacts/context', { recursive: true });
+            fs.writeFileSync('artifacts/context/changed_files.txt', files.map((f) => f.filename).join('\n') + '\n');
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', headSha);
+            core.setOutput('head_repo', headRepo);
+            core.setOutput('head_ref', headRef);
+
+      - name: Upload context artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-pr-context
+          path: artifacts/context/changed_files.txt
+          if-no-files-found: error
+
+  run-agent-evals:
+    name: run-agent-evals
+    needs: [resolve-context, infra-preflight]
+    if: ${{ needs.infra-preflight.outputs.exit_code == '0' }}
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.run.outputs.exit_code }}
+      all_blocking_passed: ${{ steps.run.outputs.all_blocking_passed }}
+      failed_count: ${{ steps.run.outputs.failed_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-context.outputs.head_repo }}
+          ref: ${{ needs.resolve-context.outputs.head_ref }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Download context artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-evals-pr-context
+          path: artifacts/context
+
+      - name: Run deterministic blocking evals
+        id: run
+        run: |
+          mkdir -p artifacts/agent-evals
+          set +e
+          python3 scripts/harness/agent_eval_runner.py \
+            --scenarios .harness/evals/scenarios.blocking.json \
+            --contract .harness/policy.contract.json \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --profile blocking \
+            --seed 42 \
+            --changed-files artifacts/context/changed_files.txt \
+            --out-dir artifacts/agent-evals \
+            --enforce true
+          code=$?
+          set -e
+
+          all_blocking_passed=$(jq -r '.summary.all_blocking_passed // false' artifacts/agent-evals/eval-results.json)
+          failed_count=$(jq -r '.summary.failed // 0' artifacts/agent-evals/eval-results.json)
+
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "all_blocking_passed=$all_blocking_passed" >> "$GITHUB_OUTPUT"
+          echo "failed_count=$failed_count" >> "$GITHUB_OUTPUT"
+
+      - name: Emit eval metrics
+        if: always()
+        env:
+          OPENFANG_EVAL_EMIT_SENTRY: ${{ vars.OPENFANG_EVAL_EMIT_SENTRY || 'false' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          if [ -f artifacts/agent-evals/eval-results.json ]; then
+            python3 scripts/harness/eval_metrics_emit.py \
+              --eval-results artifacts/agent-evals/eval-results.json \
+              --out artifacts/agent-evals/eval-metrics.json \
+              --emit-sentry "${OPENFANG_EVAL_EMIT_SENTRY}"
+          else
+            echo "eval-results.json missing; skipping metrics emit"
+          fi
+
+      - name: Upload eval artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-pr-artifacts
+          path: artifacts/agent-evals/
+          if-no-files-found: error
+
+  publish-eval-artifacts:
+    name: publish-eval-artifacts
+    needs: [resolve-context, infra-preflight, run-agent-evals]
+    if: ${{ always() && needs.infra-preflight.outputs.exit_code == '0' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download eval artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-evals-pr-artifacts
+          path: artifacts/agent-evals
+
+      - name: Publish summary
+        run: |
+          echo "## Agent Evals (PR)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PR: #${{ needs.resolve-context.outputs.pr_number }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Head SHA: ${{ needs.resolve-context.outputs.head_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- all_blocking_passed: ${{ needs.run-agent-evals.outputs.all_blocking_passed }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- failed_count: ${{ needs.run-agent-evals.outputs.failed_count }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/agent-evals/eval-summary.md ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat artifacts/agent-evals/eval-summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  agent-evals-pr:
+    name: agent-evals-pr
+    needs: [resolve-context, infra-preflight, run-agent-evals, publish-eval-artifacts]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce deterministic blocking evals
+        run: |
+          if [ "${{ needs.infra-preflight.outputs.exit_code }}" != "0" ]; then
+            echo "Infra preflight failed for PR #${{ needs.resolve-context.outputs.pr_number }}"
+            exit 1
+          fi
+          if [ "${{ needs.run-agent-evals.outputs.exit_code }}" != "0" ]; then
+            echo "Blocking agent evals failed for PR #${{ needs.resolve-context.outputs.pr_number }}"
+            exit 1
+          fi
+          if [ "${{ needs.run-agent-evals.outputs.all_blocking_passed }}" != "true" ]; then
+            echo "all_blocking_passed is false"
+            exit 1
+          fi
+          echo "Deterministic blocking evals passed."
+
+      - name: Build workflow telemetry inputs
+        if: always()
+        run: |
+          mkdir -p artifacts/agent-evals
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          preflight_fail = '${{ needs.infra-preflight.outputs.exit_code }}' != '0'
+          eval_exit = '${{ needs.run-agent-evals.outputs.exit_code }}'
+          failed_count = '${{ needs.run-agent-evals.outputs.failed_count }}'
+          all_blocking = '${{ needs.run-agent-evals.outputs.all_blocking_passed }}'
+
+          infra = {
+              "status": "fail" if preflight_fail else "pass",
+              "workflow": "agent-evals-pr",
+          }
+          Path("artifacts/infra-preflight-report.json").write_text(
+              json.dumps(infra, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+
+          failed = int(failed_count) if failed_count.isdigit() else (1 if eval_exit and eval_exit != "0" else 0)
+          eval_payload = {
+              "profile": "blocking",
+              "summary": {
+                  "failed": failed,
+                  "all_blocking_passed": all_blocking == "true",
+              },
+          }
+          Path("artifacts/agent-evals/eval-results.json").write_text(
+              json.dumps(eval_payload, indent=2, sort_keys=True) + "\\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "agent-evals-pr" \
+            --job "agent-evals-pr" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ needs.resolve-context.outputs.head_sha }}" \
+            --pr-number "${{ needs.resolve-context.outputs.pr_number }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --infra-preflight-report artifacts/infra-preflight-report.json \
+            --eval-results artifacts/agent-evals/eval-results.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-pr-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn
+
+  infra-preflight:
+    name: infra-preflight-agent-evals-pr
+    needs: resolve-context
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.preflight.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run infra preflight
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python3 scripts/harness/infra_preflight.py \
+            --contract .harness/policy.contract.json \
+            --workflow agent-evals-pr \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --out artifacts/infra-preflight-report.json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert infra incident
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/harness/infra_incident_upsert.py \
+            --repo "${{ github.repository }}" \
+            --token-env GITHUB_TOKEN \
+            --contract .harness/policy.contract.json \
+            --report artifacts/infra-preflight-report.json \
+            --out artifacts/infra-incident-upsert.json
+
+      - name: Upload infra artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-evals-pr-infra
+          path: |
+            artifacts/infra-preflight-report.json
+            artifacts/infra-incident-upsert.json
+          if-no-files-found: warn
