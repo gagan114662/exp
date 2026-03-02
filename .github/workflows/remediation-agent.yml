@@ -195,3 +195,43 @@ jobs:
         run: |
           echo "Remediation failed. Gate remains blocked."
           exit 1
+
+      - name: Emit workflow failure telemetry
+        if: always()
+        env:
+          OPENFANG_SENTRY_WORKFLOW_EVENTS: ${{ vars.OPENFANG_SENTRY_WORKFLOW_EVENTS || 'true' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          OPENFANG_SENTRY_WORKFLOW_OTLP: ${{ vars.OPENFANG_SENTRY_WORKFLOW_OTLP || 'false' }}
+          SENTRY_OTLP_LOGS_ENDPOINT: ${{ secrets.SENTRY_OTLP_LOGS_ENDPOINT || vars.SENTRY_OTLP_LOGS_ENDPOINT || '' }}
+          SENTRY_OTLP_TRACES_ENDPOINT: ${{ secrets.SENTRY_OTLP_TRACES_ENDPOINT || vars.SENTRY_OTLP_TRACES_ENDPOINT || '' }}
+          SENTRY_OTLP_AUTH_HEADER: ${{ secrets.SENTRY_OTLP_AUTH_HEADER || vars.SENTRY_OTLP_AUTH_HEADER || '' }}
+        run: |
+          python3 scripts/harness/workflow_sentry_emit.py \
+            --workflow "remediation-agent" \
+            --job "remediation-agent" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --event "${{ github.event_name }}" \
+            --repo "${{ github.repository }}" \
+            --head-sha "${{ github.event.workflow_run.head_sha }}" \
+            --pr-number "${{ steps.parse.outputs.pr_number }}" \
+            --status "${{ job.status }}" \
+            --emit "${OPENFANG_SENTRY_WORKFLOW_EVENTS}" \
+            --emit-on-failure-only "true" \
+            --sentry-dsn-env "SENTRY_DSN" \
+            --emit-otlp "${OPENFANG_SENTRY_WORKFLOW_OTLP}" \
+            --otlp-logs-endpoint-env "SENTRY_OTLP_LOGS_ENDPOINT" \
+            --otlp-traces-endpoint-env "SENTRY_OTLP_TRACES_ENDPOINT" \
+            --otlp-auth-header-env "SENTRY_OTLP_AUTH_HEADER" \
+            --risk-policy-report artifacts/risk-policy-report.json \
+            --review-findings artifacts/review-findings.json \
+            --remediation-result artifacts/remediation-result.json \
+            --out artifacts/sentry-workflow-emit.json
+
+      - name: Upload workflow telemetry artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remediation-agent-sentry-telemetry
+          path: artifacts/sentry-workflow-emit.json
+          if-no-files-found: warn
